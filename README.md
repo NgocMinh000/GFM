@@ -4,7 +4,7 @@
 apt update
 apt install git -y
 
-git clone https://github.com/NgocMinh000/fussion-and-verify-in-BKG.git
+git clone https://github.com/NgocMinh000/GFM.git
 # Cài miniconda
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh
@@ -30,5 +30,5 @@ conda remove --force faiss -y
 pip install faiss-cpu==1.9.0
 
 # Chạy workflow tạo BKG
-cd ~/gfm-rag
+cd ~/GFM
 python -m gfmrag.workflow.stage1_index_dataset
