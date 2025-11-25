@@ -1,0 +1,5 @@
+- dataset.root=D:/gfm-rag/data
+- dataset.data_name=hotpotqa
+- kg_constructor.num_processes=2
+- openie_model.model_name=gpt-4o-mini
+- ner_model.model_name=gpt-4o-mini

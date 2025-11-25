@@ -1,0 +1,42 @@
+[2025-10-09 14:23:32,268][__main__][INFO] - Config:
+ dataset:
+  root: D:/gfm-rag/data
+  data_name: hotpotqa
+kg_constructor:
+  _target_: gfmrag.kg_construction.KGConstructor
+  open_ie_model: ${openie_model}
+  ner_model: ${ner_model}
+  el_model: ${el_model}
+  root: tmp/kg_construction
+  num_processes: 2
+  cosine_sim_edges: true
+  threshold: 0.8
+  max_sim_neighbors: 100
+  add_title: true
+  force: false
+qa_constructor:
+  _target_: gfmrag.kg_construction.QAConstructor
+  root: tmp/qa_construction
+  ner_model: ${ner_model}
+  el_model: ${el_model}
+  num_processes: 10
+  force: false
+ner_model:
+  _target_: gfmrag.kg_construction.ner_model.LLMNERModel
+  llm_api: openai
+  model_name: gpt-4o-mini
+  max_tokens: 300
+openie_model:
+  _target_: gfmrag.kg_construction.openie_model.LLMOPENIEModel
+  llm_api: openai
+  model_name: gpt-4o-mini
+  max_ner_tokens: 300
+  max_triples_tokens: 4096
+el_model:
+  _target_: gfmrag.kg_construction.entity_linking_model.ColbertELModel
+  model_name_or_path: colbert-ir/colbertv2.0
+  root: tmp
+
+[2025-10-09 14:23:32,270][__main__][INFO] - Current working directory: D:\gfm-rag\gfmrag\workflow
+[2025-10-09 14:23:32,271][__main__][INFO] - Output directory: D:\gfm-rag\gfmrag\workflow\outputs\kg_construction\2025-10-09\14-23-32
+[2025-10-09 14:24:46,555][gfmrag.kg_indexer][INFO] - Stage1 KG construction

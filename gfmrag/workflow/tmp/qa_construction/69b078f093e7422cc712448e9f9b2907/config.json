@@ -1,0 +1,16 @@
+{
+    "_target_": "gfmrag.kg_construction.QAConstructor",
+    "root": "tmp/qa_construction",
+    "ner_model": {
+        "_target_": "gfmrag.kg_construction.ner_model.LLMNERModel",
+        "llm_api": "openai",
+        "model_name": "gpt-4o-mini",
+        "max_tokens": 300
+    },
+    "el_model": {
+        "_target_": "gfmrag.kg_construction.entity_linking_model.ColbertELModel",
+        "model_name_or_path": "colbert-ir/colbertv2.0",
+        "root": "tmp"
+    },
+    "num_processes": 10
+}
