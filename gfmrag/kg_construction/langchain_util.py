@@ -42,17 +42,30 @@ def init_langchain_model(
     """
     
     if llm == "openai":
-        # OpenAI GPT models
-        # Requires: OPENAI_API_KEY environment variable
+        # OpenAI GPT models or YEScale compatible API
+        # Requires: OPENAI_API_KEY or YESCALE_API_KEY environment variable
+        # Optional: YESCALE_API_BASE_URL for custom API endpoint
         assert model_name.startswith("gpt-"), f"OpenAI model must start with 'gpt-', got {model_name}"
-        return ChatOpenAI(
-            api_key=os.environ.get("OPENAI_API_KEY"),
-            model=model_name,
-            temperature=temperature,
-            max_retries=max_retries,
-            timeout=timeout,
+
+        # Priority: 1. YEScale env vars, 2. OpenAI env vars
+        api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        base_url = os.environ.get("YESCALE_API_BASE_URL")
+
+        client_kwargs = {
+            "api_key": api_key,
+            "model": model_name,
+            "temperature": temperature,
+            "max_retries": max_retries,
+            "timeout": timeout,
             **kwargs,
-        )
+        }
+
+        # Add base_url if YEScale is configured
+        if base_url:
+            client_kwargs["base_url"] = base_url
+            print(f"[LangChain] Using YEScale API at: {base_url}")
+
+        return ChatOpenAI(**client_kwargs)
     
     elif llm == "nvidia":
         # NVIDIA AI Endpoints

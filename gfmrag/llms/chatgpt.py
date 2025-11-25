@@ -44,14 +44,18 @@ def get_token_limit(model: str = "gpt-4") -> int:
 
 
 class ChatGPT(BaseLanguageModel):
-    """A class that interacts with OpenAI's ChatGPT models through their API.
+    """A class that interacts with OpenAI's ChatGPT models or compatible APIs (YEScale, etc.) through their API.
 
     This class provides functionality to generate text using ChatGPT models while handling
-    token limits, retries, and various input formats.
+    token limits, retries, and various input formats. Supports both OpenAI and YEScale APIs.
 
     Args:
         model_name_or_path (str): The name or path of the ChatGPT model to use
         retry (int, optional): Number of retries for failed API calls. Defaults to 5
+        api_key (str, optional): API key for authentication. If not provided, will use
+            YESCALE_API_KEY or OPENAI_API_KEY from environment variables
+        base_url (str, optional): Base URL for the API. If not provided, will use
+            YESCALE_API_BASE_URL from environment or default to OpenAI's URL
 
     Attributes:
         retry (int): Maximum number of retry attempts for failed API calls
@@ -68,16 +72,33 @@ class ChatGPT(BaseLanguageModel):
         Exception: If generation fails after maximum retries
     """
 
-    def __init__(self, model_name_or_path: str, retry: int = 5):
+    def __init__(
+        self,
+        model_name_or_path: str,
+        retry: int = 5,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ):
         self.retry = retry
         self.model_name = model_name_or_path
         self.maximun_token = get_token_limit(self.model_name)
 
-        client = OpenAI(
-            api_key=os.environ[
+        # Priority: 1. Explicit params, 2. YEScale env vars, 3. OpenAI env vars
+        if api_key is None:
+            api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get(
                 "OPENAI_API_KEY"
-            ],  # this is also the default, it can be omitted
-        )
+            )
+
+        if base_url is None:
+            base_url = os.environ.get("YESCALE_API_BASE_URL")
+
+        # Initialize OpenAI client with custom base_url if provided
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+            logger.info(f"Using custom API base URL: {base_url}")
+
+        client = OpenAI(**client_kwargs)
         self.client = client
 
     def token_len(self, text: str) -> int:
