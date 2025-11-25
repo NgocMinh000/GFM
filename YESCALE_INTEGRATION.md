@@ -28,17 +28,32 @@ YESCALE_API_KEY=your-yescale-api-key-here
 - `YESCALE_API_BASE_URL`: URL cơ sở của YEScale API (ví dụ: `https://api.yescale.com/v1`)
 - `YESCALE_API_KEY`: API key bạn nhận được từ YEScale
 
-### Bước 3: Kiểm tra cấu hình
+### Bước 3: Hiểu cách hoạt động (QUAN TRỌNG!)
 
-Theo mô tả API của YEScale, endpoint chat completions có dạng:
+**YEScale API = OpenAI API** (100% tương thích format)
+
+Theo tài liệu API của YEScale, endpoint chat completions là:
 ```
-POST {YESCALE_API_BASE_URL}/chat/completions
+POST /v1/chat/completions
+Authorization: Bearer {{YOUR_API_KEY}}
+Body: {"model": "gpt-4o", "messages": [...], "max_tokens": 1000}
 ```
 
-Ví dụ nếu `YESCALE_API_BASE_URL=https://api.yescale.com/v1`, thì endpoint đầy đủ sẽ là:
+Khi bạn cấu hình:
+```bash
+YESCALE_API_BASE_URL=https://api.yescale.com/v1
 ```
-https://api.yescale.com/v1/chat/completions
-```
+
+OpenAI Python SDK (được sử dụng trong code) sẽ tự động:
+1. ✅ Gọi đến: `https://api.yescale.com/v1/chat/completions`
+2. ✅ Thêm header: `Authorization: Bearer {YESCALE_API_KEY}`
+3. ✅ Format request/response giống hệt OpenAI API
+
+**⚠️ Lưu ý về base_url:**
+- ✅ **ĐÚNG**: `YESCALE_API_BASE_URL=https://api.yescale.com/v1` (bao gồm `/v1`)
+- ❌ **SAI**: `YESCALE_API_BASE_URL=https://api.yescale.com` (thiếu `/v1`)
+
+Vì OpenAI SDK sẽ tự động append `/chat/completions` vào base_url, không append `/v1`!
 
 ## Cách hoạt động
 
@@ -53,6 +68,95 @@ Khi bạn cấu hình `YESCALE_API_BASE_URL`, hệ thống sẽ tự động:
 Hệ thống sẽ tìm kiếm API key theo thứ tự:
 1. `YESCALE_API_KEY` (nếu có)
 2. `OPENAI_API_KEY` (nếu không có YEScale key)
+
+## Giải thích kỹ thuật
+
+### Tại sao code hiện tại đã đúng và tương thích 100%?
+
+**1. YEScale API = OpenAI API (cùng format)**
+
+Từ tài liệu YEScale:
+```python
+# YEScale Request
+POST /v1/chat/completions
+Headers: Authorization: Bearer {{API_KEY}}
+Body: {"model": "gpt-4o", "messages": [...]}
+
+# YEScale Response
+{"id": "...", "choices": [{"message": {"content": "..."}}], "usage": {...}}
+```
+
+Đây **chính xác là format của OpenAI API**! Không có gì khác biệt.
+
+**2. OpenAI Python SDK hỗ trợ custom base_url**
+
+Code trong `gfmrag/llms/chatgpt.py`:
+```python
+from openai import OpenAI
+
+# Init với custom base_url
+client = OpenAI(
+    api_key=os.environ.get("YESCALE_API_KEY"),
+    base_url=os.environ.get("YESCALE_API_BASE_URL")  # YEScale endpoint
+)
+
+# Sử dụng như bình thường
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}],
+    temperature=0.0
+)
+```
+
+Khi `base_url` được set, OpenAI SDK sẽ:
+- ✅ Gọi đến `{base_url}/chat/completions` thay vì OpenAI
+- ✅ Tự động thêm header `Authorization: Bearer {api_key}`
+- ✅ Parse response theo OpenAI format
+
+**3. Không cần sửa gì cả!**
+
+Vì YEScale API tương thích 100% với OpenAI API, chúng ta chỉ cần:
+- Set `YESCALE_API_BASE_URL` trong `.env`
+- Code sẽ tự động redirect đến YEScale
+- Không cần thay đổi bất kỳ logic nào
+
+### So sánh với cách gọi raw requests
+
+**Cách 1: OpenAI SDK (code hiện tại - ĐÚNG)**
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="your-key",
+    base_url="https://api.yescale.com/v1"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(response.choices[0].message.content)
+```
+
+**Cách 2: Raw requests (như docs YEScale)**
+```python
+import requests
+import json
+
+url = "https://api.yescale.com/v1/chat/completions"
+
+payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Hello!"}]}
+headers = {
+    'Authorization': 'Bearer your-key',
+    'Content-Type': 'application/json'
+}
+
+response = requests.post(url, headers=headers, data=json.dumps(payload))
+data = response.json()
+print(data['choices'][0]['message']['content'])
+```
+
+**Kết quả: Giống hệt nhau!** Cách 1 sử dụng SDK tiện lợi và an toàn hơn.
 
 ## Sử dụng
 
