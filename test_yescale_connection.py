@@ -84,18 +84,18 @@ def test_with_requests():
 
         # Get credentials
         api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        base_url = os.environ.get("YESCALE_API_BASE_URL")
+        full_url = os.environ.get("YESCALE_API_BASE_URL")
 
         if not api_key:
             print("❌ ERROR: API key không được set!")
             return False
 
-        if not base_url:
+        if not full_url:
             print("⚠️  WARNING: YESCALE_API_BASE_URL không được set, skip test này")
             return False
 
-        # Build full URL
-        url = f"{base_url}/chat/completions"
+        # Use full URL directly (already includes /chat/completions)
+        url = full_url
         print(f"✓ Full URL: {url}")
 
         # Prepare request
