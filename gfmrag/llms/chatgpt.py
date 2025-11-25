@@ -164,9 +164,10 @@ class ChatGPT(BaseLanguageModel):
                 payload = {
                     "model": self.model_name,
                     "messages": message,
-                    "temperature": 0.0,
-                    "max_tokens": self.maximun_token
+                    "temperature": 0.0
                 }
+                # Don't send max_tokens to let API decide based on model capabilities
+                # YEScale may have different limits than OpenAI
 
                 response = requests.post(
                     self.api_url,
