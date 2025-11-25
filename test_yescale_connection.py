@@ -13,9 +13,9 @@ load_dotenv()
 
 
 def test_with_openai_sdk():
-    """Test kết nối YEScale bằng OpenAI Python SDK"""
+    """Test kết nối YEScale bằng OpenAI Python SDK (với strip /chat/completions)"""
     print("=" * 60)
-    print("Test 1: Sử dụng OpenAI SDK với YEScale base_url")
+    print("Test 1: Sử dụng OpenAI SDK (LangChain style - strip /chat/completions)")
     print("=" * 60)
 
     try:
@@ -23,20 +23,27 @@ def test_with_openai_sdk():
 
         # Get credentials from environment
         api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        base_url = os.environ.get("YESCALE_API_BASE_URL")
+        full_url = os.environ.get("YESCALE_API_BASE_URL")
 
         if not api_key:
             print("❌ ERROR: YESCALE_API_KEY hoặc OPENAI_API_KEY không được set!")
             return False
 
         print(f"✓ API Key: {api_key[:10]}...")
-        print(f"✓ Base URL: {base_url or 'None (sẽ dùng OpenAI default)'}")
+        print(f"✓ Full URL: {full_url or 'None (sẽ dùng OpenAI default)'}")
 
         # Initialize OpenAI client
         client_kwargs = {"api_key": api_key}
-        if base_url:
+        if full_url:
+            # Strip /chat/completions từ URL
+            if full_url.endswith("/chat/completions"):
+                base_url = full_url[:-len("/chat/completions")]
+                print(f"✓ Stripped to base_url: {base_url}")
+                print(f"✓ SDK sẽ gọi đến: {base_url}/chat/completions")
+            else:
+                base_url = full_url
+
             client_kwargs["base_url"] = base_url
-            print(f"✓ Sẽ gọi đến: {base_url}/chat/completions")
 
         client = OpenAI(**client_kwargs)
 
@@ -143,21 +150,21 @@ def test_chatgpt_class():
         from gfmrag.llms import ChatGPT
 
         api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        base_url = os.environ.get("YESCALE_API_BASE_URL")
+        api_url = os.environ.get("YESCALE_API_BASE_URL")
 
         if not api_key:
             print("❌ ERROR: API key không được set!")
             return False
 
         print(f"✓ API Key: {api_key[:10]}...")
-        print(f"✓ Base URL: {base_url or 'None (OpenAI default)'}")
+        print(f"✓ API URL: {api_url or 'None (OpenAI default)'}")
 
         # Initialize ChatGPT với YEScale params
         print("🔄 Khởi tạo ChatGPT class...")
         llm = ChatGPT(
             model_name_or_path="gpt-4o-mini",
             api_key=api_key,
-            base_url=base_url
+            api_url=api_url  # Changed from base_url to api_url
         )
 
         # Test generate

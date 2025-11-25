@@ -1,17 +1,16 @@
+import json
 import logging
 import os
 import time
 
 import dotenv
+import requests
 import tiktoken
-from openai import OpenAI
 
 from .base_language_model import BaseLanguageModel
 
 logger = logging.getLogger(__name__)
-# Disable OpenAI and httpx logging
-# Configure logging level for specific loggers by name
-logging.getLogger("openai").setLevel(logging.ERROR)
+# Disable httpx logging
 logging.getLogger("httpx").setLevel(logging.ERROR)
 
 dotenv.load_dotenv()
@@ -44,24 +43,25 @@ def get_token_limit(model: str = "gpt-4") -> int:
 
 
 class ChatGPT(BaseLanguageModel):
-    """A class that interacts with OpenAI's ChatGPT models or compatible APIs (YEScale, etc.) through their API.
+    """A class that interacts with ChatGPT-compatible APIs (YEScale, OpenAI, etc.) using requests library.
 
     This class provides functionality to generate text using ChatGPT models while handling
-    token limits, retries, and various input formats. Supports both OpenAI and YEScale APIs.
+    token limits, retries, and various input formats. Supports YEScale and OpenAI APIs.
 
     Args:
         model_name_or_path (str): The name or path of the ChatGPT model to use
         retry (int, optional): Number of retries for failed API calls. Defaults to 5
         api_key (str, optional): API key for authentication. If not provided, will use
             YESCALE_API_KEY or OPENAI_API_KEY from environment variables
-        base_url (str, optional): Base URL for the API. If not provided, will use
-            YESCALE_API_BASE_URL from environment or default to OpenAI's URL
+        api_url (str, optional): Full API URL (including /chat/completions). If not provided,
+            will use YESCALE_API_BASE_URL from environment or default to OpenAI's URL
 
     Attributes:
         retry (int): Maximum number of retry attempts for failed API calls
         model_name (str): Name of the ChatGPT model being used
         maximun_token (int): Maximum token limit for the specified model
-        client (OpenAI): OpenAI client instance for API interactions
+        api_key (str): API key for authentication
+        api_url (str): Full API endpoint URL
 
     Methods:
         token_len(text): Calculate the number of tokens in a given text
@@ -77,7 +77,7 @@ class ChatGPT(BaseLanguageModel):
         model_name_or_path: str,
         retry: int = 5,
         api_key: str | None = None,
-        base_url: str | None = None,
+        api_url: str | None = None,
     ):
         self.retry = retry
         self.model_name = model_name_or_path
@@ -89,17 +89,13 @@ class ChatGPT(BaseLanguageModel):
                 "OPENAI_API_KEY"
             )
 
-        if base_url is None:
-            base_url = os.environ.get("YESCALE_API_BASE_URL")
+        if api_url is None:
+            # Try YEScale first, then OpenAI default
+            api_url = os.environ.get("YESCALE_API_BASE_URL") or "https://api.openai.com/v1/chat/completions"
 
-        # Initialize OpenAI client with custom base_url if provided
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-            logger.info(f"Using custom API base URL: {base_url}")
-
-        client = OpenAI(**client_kwargs)
-        self.client = client
+        self.api_key = api_key
+        self.api_url = api_url
+        logger.info(f"Using API endpoint: {self.api_url}")
 
     def token_len(self, text: str) -> int:
         """Returns the number of tokens used by a list of messages."""
@@ -152,21 +148,45 @@ class ChatGPT(BaseLanguageModel):
         input_length = self.token_len(message_string)
         if input_length > self.maximun_token:
             print(
-                f"Input lengt {input_length} is too long. The maximum token is {self.maximun_token}.\n Right tuncate the input to {self.maximun_token} tokens."
+                f"Input length {input_length} is too long. The maximum token is {self.maximun_token}.\n Right truncate the input to {self.maximun_token} tokens."
             )
             llm_input = llm_input[: self.maximun_token]
         error = Exception("Failed to generate sentence")
         while cur_retry <= num_retry:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name, messages=message, timeout=60, temperature=0.0
+                # Use requests library to call API (YEScale compatible)
+                headers = {
+                    'Accept': 'application/json',
+                    'Authorization': f'Bearer {self.api_key}',
+                    'Content-Type': 'application/json'
+                }
+
+                payload = {
+                    "model": self.model_name,
+                    "messages": message,
+                    "temperature": 0.0,
+                    "max_tokens": self.maximun_token
+                }
+
+                response = requests.post(
+                    self.api_url,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=60
                 )
-                result = response.choices[0].message.content.strip()  # type: ignore
-                return result
+
+                # Check response status
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data['choices'][0]['message']['content'].strip()
+                    return result
+                else:
+                    raise Exception(f"API Error {response.status_code}: {response.text}")
+
             except Exception as e:
-                logger.error("Message: ", llm_input)
-                logger.error("Number of token: ", self.token_len(message_string))
-                logger.error(e)
+                logger.error(f"Message: {llm_input}")
+                logger.error(f"Number of tokens: {self.token_len(message_string)}")
+                logger.error(f"Error: {e}")
                 time.sleep(30)
                 cur_retry += 1
                 error = e
