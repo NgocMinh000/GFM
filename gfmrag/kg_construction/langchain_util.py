@@ -61,9 +61,15 @@ def init_langchain_model(
         }
 
         # Add base_url if YEScale is configured
+        # IMPORTANT: Strip /chat/completions from base_url because OpenAI SDK will append it automatically
         if base_url:
+            # Remove /chat/completions suffix if present (YEScale full URL)
+            if base_url.endswith("/chat/completions"):
+                base_url = base_url[:-len("/chat/completions")]
+                print(f"[LangChain] Stripped /chat/completions from base_url")
+
             client_kwargs["base_url"] = base_url
-            print(f"[LangChain] Using YEScale API at: {base_url}")
+            print(f"[LangChain] Using YEScale API at: {base_url} (SDK will append /chat/completions)")
 
         return ChatOpenAI(**client_kwargs)
     
