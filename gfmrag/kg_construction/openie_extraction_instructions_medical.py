@@ -112,28 +112,70 @@ ner_instruction = """Your task is to extract MEDICAL named entities from the giv
 Focus on extracting the following types of medical entities:
 
 **Clinical Entities:**
-- Diseases, disorders, and medical conditions (e.g., "type 2 diabetes mellitus", "myocardial infarction")
-- Signs and symptoms (e.g., "chest pain", "shortness of breath", "fever")
+- Diseases, disorders, and medical conditions (e.g., "type 2 diabetes mellitus", "myocardial infarction", "essential hypertension")
+  * Use full medical terminology when available (e.g., "type 2 diabetes mellitus" not "T2DM" or "diabetes")
+  * Include severity/stage if mentioned (e.g., "stage 3 chronic kidney disease", "severe asthma")
+- Signs and symptoms (e.g., "chest pain", "shortness of breath", "fever", "diaphoresis")
+  * Include clinically relevant qualifiers (e.g., "severe chest pain", "sudden onset chest pain")
 - Anatomical structures and body parts (e.g., "right coronary artery", "left arm", "inferior wall")
+  * Be specific with laterality and location (e.g., "proximal right coronary artery", "distal left anterior descending artery")
 
 **Medications and Treatments:**
-- Drug names (generic and brand names) (e.g., "Metformin", "Lisinopril", "Aspirin")
-- Dosages and frequencies (e.g., "1000mg twice daily", "10mg once daily")
-- Treatment procedures (e.g., "percutaneous coronary intervention", "coronary angiography")
+- Drug names - extract generic names (e.g., "Metformin", "Lisinopril", "Aspirin", "Clopidogrel")
+  * Prefer generic names over brand names when both are mentioned
+  * Extract each drug separately if multiple drugs mentioned together
+- Dosages and frequencies - extract as complete units (e.g., "1000mg twice daily", "10mg once daily", "81mg daily")
+  * ALWAYS include both dose amount AND frequency together as one entity
+  * Include route if mentioned (e.g., "5mg sublingual")
+- Treatment procedures (e.g., "percutaneous coronary intervention", "coronary angiography", "coronary artery bypass grafting")
+  * Include procedure modifiers (e.g., "emergency coronary angiography", "elective PCI")
 
 **Diagnostic Information:**
-- Laboratory tests and values (e.g., "Troponin I", "5.8 ng/mL", "blood glucose")
-- Diagnostic procedures (e.g., "12-lead ECG", "coronary angiography")
-- Imaging findings (e.g., "ST-segment elevation", "95% stenosis")
-- Vital signs (e.g., "blood pressure", "160/95 mmHg", "heart rate")
+- Laboratory tests and biomarkers (e.g., "Troponin I", "CK-MB", "blood glucose", "HbA1c", "creatinine")
+  * Extract test name separate from value
+- Lab values with units (e.g., "5.8 ng/mL", "185 mg/dL", "160/95 mmHg", "110 beats per minute")
+  * ALWAYS include units with numerical values as single entity
+  * Extract percentage values with % symbol (e.g., "92%", "95% stenosis")
+- Diagnostic procedures (e.g., "12-lead ECG", "coronary angiography", "chest X-ray", "echocardiogram")
+- Imaging/test findings (e.g., "ST-segment elevation", "95% stenosis", "thrombus", "ejection fraction")
+  * Extract specific findings, not vague terms like "abnormal" alone
+- Vital signs (e.g., "blood pressure", "heart rate", "oxygen saturation", "respiratory rate")
+  * Extract vital sign name separate from its measured value
 
 **Patient Information:**
-- Age and demographics (e.g., "58-year-old male patient")
-- Temporal information (e.g., "10 years ago", "2 hours prior")
+- Patient demographics (e.g., "58-year-old male patient", "65-year-old female")
+  * Include age, gender together when possible
+- Temporal information (e.g., "10 years ago", "2 hours prior", "at bedtime", "for 5 days")
+  * Extract specific time references related to medical events or treatments
 
 **Medical Devices and Equipment:**
-- Medical devices (e.g., "drug-eluting stent")
-- Equipment (e.g., "emergency department")
+- Medical devices (e.g., "drug-eluting stent", "bare-metal stent", "pacemaker")
+- Clinical locations (e.g., "emergency department", "intensive care unit", "catheterization lab")
+
+**EXTRACTION GUIDELINES:**
+
+1. **Entity Boundaries:**
+   - Include modifiers that change medical meaning: "acute myocardial infarction" (keep "acute" with condition)
+   - For compound terms, extract the complete medical phrase: "inferior wall myocardial infarction" not just "infarction"
+   - Extract medication name and dosage as SEPARATE entities: "Metformin" AND "1000mg twice daily"
+
+2. **Normalization:**
+   - Expand common medical abbreviations: "MI" → "myocardial infarction", "HTN" → "hypertension", "DM" → "diabetes mellitus"
+   - Use standard medical terminology over lay terms: "heart attack" → "myocardial infarction"
+   - Keep measurement units with values: "5.8 ng/mL" not just "5.8"
+
+3. **What NOT to extract:**
+   - Generic verbs: "showed", "revealed", "indicated", "diagnosed" (these become relations, not entities)
+   - Negation words alone: "no", "without", "denies", "absent" (but DO extract the negated entity)
+   - Pronouns: "he", "she", "it", "his", "her" (resolve to actual patient identifier if needed)
+   - Vague qualifiers alone: "normal", "abnormal", "positive", "negative" without specific entity
+
+4. **Handling Special Cases:**
+   - **Negated findings**: Still extract the entity (e.g., "no fever" → extract "fever")
+   - **Uncertain findings**: Extract the entity (e.g., "possible pneumonia" → extract "pneumonia", "rule out MI" → extract "myocardial infarction")
+   - **Value ranges**: Extract as single entity (e.g., "120-140 mg/dL", "2-3 weeks")
+   - **Multiple items**: Extract each separately (e.g., "Aspirin and Clopidogrel" → "Aspirin", "Clopidogrel")
+   - **Acronyms with expansion**: Use full form (e.g., "STEMI (ST-elevation myocardial infarction)" → "ST-elevation myocardial infarction")
 
 Respond with a JSON list of entities.
 Strictly follow the required JSON format: {"named_entities": [...]}
@@ -215,62 +257,103 @@ one_shot_passage_triples = """{"triples": [
 ]}
 """
 
-# Hướng dẫn cho OpenIE Post-NER (Medical Domain)
+# Hướng dẫn cho OpenIE Post-NER (Medical Domain) - IMPROVED VERSION
 openie_post_ner_instruction = """Your task is to construct a MEDICAL KNOWLEDGE GRAPH from the given clinical text and medical named entity lists.
 
-Extract relationships that represent CLINICAL FACTS and MEDICAL RELATIONSHIPS, such as:
+Extract relationships that represent CLINICAL FACTS and MEDICAL RELATIONSHIPS. Use the following relationship types:
 
 **Patient-Condition Relationships:**
-- ["patient", "has medical history of", "disease/condition"]
-- ["patient", "diagnosed with", "disease/condition"]
-- ["patient", "presented with", "symptom"]
-- ["patient", "experienced", "symptom"]
+- ["patient", "has medical history of", "disease/condition"] - For chronic/pre-existing conditions
+- ["patient", "diagnosed with", "disease/condition"] - For current/new diagnoses
+- ["patient", "presented with", "symptom"] - For chief complaints at presentation
+- ["patient", "experienced", "symptom"] - For symptoms reported during history
+- ["patient", "had vital sign", "vital sign name"] - Link patient to vital sign measurement
 
 **Treatment and Medication Relationships:**
-- ["patient", "treated with", "medication/procedure"]
-- ["patient", "prescribed", "medication"]
-- ["patient", "underwent", "procedure/test"]
-- ["condition", "managed with", "medication"]
-- ["condition", "treated with", "procedure"]
-- ["medication", "prescribed at", "dosage"]
-- ["medication", "dose increased to", "dosage"]
+- ["patient", "treated with", "procedure/intervention"] - For therapeutic procedures performed
+- ["patient", "prescribed", "medication"] - For medications ordered
+- ["patient", "underwent", "diagnostic procedure"] - For diagnostic tests/procedures performed
+- ["condition", "managed with", "medication"] - Link condition to its treatment
+- ["condition", "treated with", "procedure"] - Link condition to therapeutic procedure
+- ["condition", "controlled with", "medication"] - For chronic disease management
+- ["medication", "prescribed at", "dosage"] - Link medication to its dose/frequency
+- ["medication", "dose increased to", "dosage"] - For dose adjustments
+- ["medication", "dose decreased to", "dosage"] - For dose reductions
+- ["procedure", "involved", "device/technique"] - Components of procedure
 
 **Diagnostic Relationships:**
-- ["test/procedure", "showed", "finding"]
-- ["test/procedure", "revealed", "finding"]
-- ["finding", "indicates", "diagnosis"]
-- ["finding", "consistent with", "diagnosis"]
-- ["biomarker", "elevated at", "value"]
-- ["biomarker", "measured at", "value"]
+- ["diagnostic procedure", "showed", "finding"] - Direct test results
+- ["diagnostic procedure", "revealed", "finding"] - Significant findings from tests
+- ["finding", "indicates", "diagnosis"] - Findings that establish diagnosis
+- ["finding", "consistent with", "diagnosis"] - Findings that support diagnosis
+- ["finding", "suggestive of", "diagnosis"] - Findings that hint at diagnosis
+- ["biomarker/test", "elevated at", "value"] - For abnormally high values
+- ["biomarker/test", "measured at", "value"] - For normal or specific values
+- ["vital sign", "measured at", "value"] - Link vital sign to measured value
+- ["finding", "observed in", "anatomical location"] - Localize findings to anatomy
 
 **Anatomical and Localization Relationships:**
-- ["disease/finding", "affects", "anatomical structure"]
-- ["disease/finding", "located in", "anatomical structure"]
-- ["finding", "observed in", "anatomical location"]
-- ["device/stent", "placed in", "anatomical structure"]
-- ["symptom", "radiates to", "body part"]
+- ["disease/finding", "affects", "anatomical structure"] - Disease impact on organ/structure
+- ["disease/finding", "located in", "anatomical structure"] - Precise anatomical location
+- ["device/stent", "placed in", "anatomical structure"] - Device placement location
+- ["symptom", "radiates to", "body part"] - Pain/symptom radiation pattern
+- ["anatomical structure", "contained", "pathology"] - Pathology within structure
 
 **Temporal Relationships:**
-- ["condition", "diagnosed", "time period"]
-- ["symptom", "started", "time point"]
-- ["medication", "taken for", "duration"]
+- ["condition", "diagnosed", "time period"] - When condition was diagnosed
+- ["symptom", "started", "time point"] - Symptom onset time
+- ["medication", "taken for", "duration"] - Duration of medication use
+- ["event", "occurred", "time point"] - When medical event happened
 
 **Causality and Association:**
-- ["condition", "caused by", "factor"]
-- ["medication", "controls", "condition"]
-- ["finding", "suggestive of", "diagnosis"]
+- ["factor", "caused", "condition"] - Direct causation
+- ["medication", "controls", "condition"] - Medication effectiveness
+- ["condition", "resulted in", "complication"] - Condition leading to complication
+
+**EXTRACTION GUIDELINES:**
+
+1. **Relationship Selection:**
+   - Choose predicates that accurately reflect the clinical relationship
+   - Use specific predicates over generic ones: prefer "controlled with" over "treated with" for chronic disease management
+   - Directionality matters: ["test", "showed", "finding"] NOT ["finding", "showed by", "test"]
+
+2. **Entity Usage:**
+   - Each triple MUST contain at least ONE entity from the provided named entity list
+   - Strongly prefer triples with BOTH subject and object from the entity list
+   - Use "patient" or patient identifier (e.g., "58-year-old male patient") consistently
+   - Resolve all pronouns to actual entities
+
+3. **Medical Accuracy:**
+   - Only extract relationships that are explicitly stated or strongly implied in the text
+   - Do NOT infer relationships based on general medical knowledge alone
+   - For diagnostic findings, always link: [procedure] → [finding] → [diagnosis] when available
+   - For medications, always link: [patient] → [medication] AND [medication] → [dosage]
+
+4. **Handling Special Cases:**
+   - **Negated relationships**: Extract with negative predicate if clinically significant (e.g., ["patient", "denies", "chest pain"])
+   - **Uncertain relationships**: You may extract with uncertainty predicates (e.g., ["finding", "suggestive of", "diagnosis"])
+   - **Multiple objects**: Create separate triples (e.g., "pain in arm and jaw" → ["pain", "radiates to", "arm"], ["pain", "radiates to", "jaw"])
+   - **Intermediate nodes**: Create chain if needed (e.g., [test] → [finding] → [diagnosis] rather than skipping [finding])
+
+5. **Completeness:**
+   - For medication mentions, extract BOTH:
+     * ["patient", "prescribed", "medication"]
+     * ["medication", "prescribed at", "dosage"]
+   - For vital signs, extract BOTH:
+     * ["patient", "had vital sign", "vital sign name"]
+     * ["vital sign name", "measured at", "value"]
+   - For diagnostic procedures, extract BOTH:
+     * ["patient", "underwent", "procedure"]
+     * ["procedure", "showed/revealed", "finding"]
+
+6. **What NOT to extract:**
+   - Do NOT create triples with only generic terms not in entity list
+   - Do NOT extract relationships between temporal modifiers alone (e.g., ["10 years ago", "before", "5 years ago"])
+   - Do NOT create circular or redundant relationships
+   - Do NOT extract relationships from example/hypothetical scenarios in the text
 
 Respond with a JSON list of triples, with each triple representing a medical relationship in the format:
 [subject, predicate, object]
-
-**IMPORTANT REQUIREMENTS:**
-- Each triple MUST contain at least one, but preferably TWO, of the medical named entities from the provided list
-- Use clinically accurate predicates that reflect true medical relationships
-- Clearly resolve pronouns to specific patient identifiers or medical terms (e.g., "He" → "patient")
-- Maintain temporal accuracy and causality when extracting time-related relationships
-- Focus on extracting factual medical information, not speculative or uncertain statements
-- For medications, always include dosage information when available
-- For diagnostic findings, link them to the diagnostic procedure and clinical significance
 
 Strictly follow the required JSON format: {"triples": [...]}
 """
