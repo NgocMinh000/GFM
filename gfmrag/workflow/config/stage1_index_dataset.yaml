@@ -23,7 +23,7 @@ kg_constructor:
   threshold: 0.8 # Threshold for cosine similarity
   max_sim_neighbors: 100 # Maximum number of similar neighbors to add
   add_title: True # Whether to add the title to the content of the document during OpenIE
-  force: False # Whether to force recompute the KG
+  force: True # Whether to force recompute the KG (True = always recompute from scratch)
 
 qa_constructor:
   _target_: gfmrag.kg_construction.QAConstructor # The QAConstructor class
@@ -31,4 +31,4 @@ qa_constructor:
   ner_model: ${ner_model}
   el_model: ${el_model}
   num_processes: 10 # Number of processes to use
-  force: False # Whether to force recompute the QA data
+  force: True # Whether to force recompute the QA data (True = always recompute from scratch)
