@@ -13,6 +13,8 @@ from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langchain_openai import ChatOpenAI
 from langchain_together import ChatTogether
 
+from gfmrag.kg_construction.yescale_chat_model import YEScaleChatModel
+
 
 def init_langchain_model(
     llm: str,
@@ -21,7 +23,7 @@ def init_langchain_model(
     max_retries: int = 5,
     timeout: int = 60,
     **kwargs: Any,
-) -> ChatOpenAI | ChatTogether | ChatOllama | ChatLlamaCpp:
+) -> ChatOpenAI | ChatTogether | ChatOllama | ChatLlamaCpp | YEScaleChatModel:
     """
     Khởi tạo language model từ LangChain.
     
@@ -49,29 +51,31 @@ def init_langchain_model(
 
         # Priority: 1. YEScale env vars, 2. OpenAI env vars
         api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        base_url = os.environ.get("YESCALE_API_BASE_URL")
+        yescale_url = os.environ.get("YESCALE_API_BASE_URL")
 
-        client_kwargs = {
-            "api_key": api_key,
-            "model": model_name,
-            "temperature": temperature,
-            "max_retries": max_retries,
-            "timeout": timeout,
-            **kwargs,
-        }
-
-        # Add base_url if YEScale is configured
-        # IMPORTANT: Strip /chat/completions from base_url because OpenAI SDK will append it automatically
-        if base_url:
-            # Remove /chat/completions suffix if present (YEScale full URL)
-            if base_url.endswith("/chat/completions"):
-                base_url = base_url[:-len("/chat/completions")]
-                print(f"[LangChain] Stripped /chat/completions from base_url")
-
-            client_kwargs["base_url"] = base_url
-            print(f"[LangChain] Using YEScale API at: {base_url} (SDK will append /chat/completions)")
-
-        return ChatOpenAI(**client_kwargs)
+        # If YEScale URL is configured, use custom YEScaleChatModel (no URL manipulation)
+        if yescale_url:
+            print(f"[LangChain] Using YEScale API at: {yescale_url} (full URL, no appending)")
+            return YEScaleChatModel(
+                api_url=yescale_url,
+                api_key=api_key,
+                model=model_name,
+                temperature=temperature,
+                max_retries=max_retries,
+                timeout=timeout,
+                **kwargs,
+            )
+        else:
+            # Use standard OpenAI SDK for official OpenAI API
+            print(f"[LangChain] Using OpenAI API (official)")
+            return ChatOpenAI(
+                api_key=api_key,
+                model=model_name,
+                temperature=temperature,
+                max_retries=max_retries,
+                timeout=timeout,
+                **kwargs,
+            )
     
     elif llm == "nvidia":
         # NVIDIA AI Endpoints
