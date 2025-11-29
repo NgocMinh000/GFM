@@ -568,7 +568,20 @@ class KGConstructor(BaseKGConstructor):
         logger.info("Augmenting graph from similarity")
 
         unique_phrases = list(kb_phrase_dict.keys())
-        processed_phrases = [processing_phrases(p) for p in unique_phrases]
+
+        # Create mapping: processed_phrase -> original_phrase
+        phrase_mapping = {}
+        processed_phrases = []
+        for original_phrase in unique_phrases:
+            processed = processing_phrases(original_phrase)
+            if processed and processed.strip():  # Only include non-empty processed phrases
+                processed_phrases.append(processed)
+                phrase_mapping[processed] = original_phrase
+
+        # Skip entity linking if no valid entities
+        if not processed_phrases:
+            logger.warning("No valid entities to index for entity linking. Skipping augmentation.")
+            return
 
         self.el_model.index(processed_phrases)
 
@@ -576,21 +589,30 @@ class KGConstructor(BaseKGConstructor):
         sim_neighbors = self.el_model(processed_phrases, topk=self.max_sim_neighbors)
 
         logger.info("Adding synonymy edges")
-        for phrase, neighbors in tqdm(sim_neighbors.items()):
+        for processed_phrase, neighbors in tqdm(sim_neighbors.items()):
             synonyms = []  # [(phrase_id, score)]
-            if len(re.sub("[^A-Za-z0-9]", "", phrase)) > 2:
-                phrase_id = kb_phrase_dict[phrase]
+            if len(re.sub("[^A-Za-z0-9]", "", processed_phrase)) > 2:
+                # Map back to original phrase
+                original_phrase = phrase_mapping.get(processed_phrase)
+                if original_phrase is None:
+                    continue
+
+                phrase_id = kb_phrase_dict.get(original_phrase)
                 if phrase_id is not None:
                     num_nns = 0
                     for neighbor in neighbors:
-                        n_entity = neighbor["entity"]
+                        processed_neighbor = neighbor["entity"]
                         n_score = neighbor["norm_score"]
                         if n_score < self.threshold or num_nns > self.max_sim_neighbors:
                             break
-                        if n_entity != phrase:
-                            phrase2_id = kb_phrase_dict[n_entity]
+                        if processed_neighbor != processed_phrase:
+                            # Map neighbor back to original phrase
+                            original_neighbor = phrase_mapping.get(processed_neighbor)
+                            if original_neighbor is None:
+                                continue
+
+                            phrase2_id = kb_phrase_dict.get(original_neighbor)
                             if phrase2_id is not None:
-                                phrase2 = n_entity
-                                synonyms.append((n_entity, n_score))
-                                graph[(phrase, phrase2)] = "equivalent"
+                                synonyms.append((original_neighbor, n_score))
+                                graph[(original_phrase, original_neighbor)] = "equivalent"
                                 num_nns += 1
