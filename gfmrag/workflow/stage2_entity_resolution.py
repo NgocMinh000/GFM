@@ -247,18 +247,16 @@ class EntityResolutionPipeline:
         logger.info(f"Method: {self.config.type_inference_method}")
         logger.info(f"Processing {len(self.entities)} entities...")
 
-        # TODO: Implement type inference
-        # Methods:
-        # 1. Pattern-based: Regex rules (e.g., -itis$ = disease)
-        # 2. Relationship-based: Infer from graph (treats→ = drug)
-        # 3. Hybrid: Combine both
-
         entity_types = {}
+        method = self.config.type_inference_method
+
         for entity in tqdm(self.entities, desc="Type inference"):
-            entity_types[entity] = {
-                "type": "other",  # Placeholder
-                "confidence": 0.5
-            }
+            if method == "pattern":
+                entity_types[entity] = self._infer_type_pattern(entity)
+            elif method == "relationship":
+                entity_types[entity] = self._infer_type_relationship(entity)
+            else:  # hybrid
+                entity_types[entity] = self._infer_type_hybrid(entity)
 
         # Save
         if self.config.save_intermediate:
@@ -270,6 +268,150 @@ class EntityResolutionPipeline:
         self.evaluate_stage0(entity_types)
 
         return entity_types
+
+    def _infer_type_pattern(self, entity: str) -> Dict:
+        """Infer entity type using pattern matching (regex)"""
+        import re
+
+        entity_lower = entity.lower()
+
+        # Medical suffix patterns
+        disease_patterns = [
+            r'.*itis$',  # inflammation: arthritis, hepatitis
+            r'.*osis$',  # condition: necrosis, psychosis
+            r'.*oma$',   # tumor: carcinoma, melanoma
+            r'.*pathy$', # disease: neuropathy, myopathy
+            r'.*syndrome$',
+            r'.*disease$',
+            r'.*infection$',
+            r'.*cancer$',
+            r'.*tumor$',
+        ]
+
+        drug_patterns = [
+            r'.*cin$',    # antibiotics: penicillin, streptomycin
+            r'.*ril$',    # ACE inhibitors: lisinopril, enalapril
+            r'.*olol$',   # beta blockers: propranolol, atenolol
+            r'.*pam$',    # benzodiazepines: diazepam, lorazepam
+            r'.*ide$',    # diuretics: furosemide, hydrochlorothiazide
+            r'.*statin$', # statins: atorvastatin, simvastatin
+            r'.*mab$',    # monoclonal antibodies: rituximab
+        ]
+
+        symptom_patterns = [
+            r'.*pain$',
+            r'.*ache$',
+            r'.*fever$',
+            r'.*cough$',
+            r'.*nausea$',
+            r'.*fatigue$',
+        ]
+
+        gene_patterns = [
+            r'^[A-Z]{2,6}\d+$',  # Gene symbols: TP53, BRCA1
+            r'.*gene$',
+        ]
+
+        procedure_patterns = [
+            r'.*ectomy$',  # removal: appendectomy
+            r'.*otomy$',   # cutting: laparotomy
+            r'.*plasty$',  # surgical repair: angioplasty
+            r'.*scopy$',   # examination: endoscopy
+            r'.*therapy$',
+            r'.*surgery$',
+        ]
+
+        # Check patterns
+        for pattern in disease_patterns:
+            if re.match(pattern, entity_lower):
+                return {"type": "disease", "confidence": 0.85}
+
+        for pattern in drug_patterns:
+            if re.match(pattern, entity_lower):
+                return {"type": "drug", "confidence": 0.85}
+
+        for pattern in symptom_patterns:
+            if re.match(pattern, entity_lower):
+                return {"type": "symptom", "confidence": 0.85}
+
+        for pattern in gene_patterns:
+            if re.match(pattern, entity_lower):
+                return {"type": "gene", "confidence": 0.85}
+
+        for pattern in procedure_patterns:
+            if re.match(pattern, entity_lower):
+                return {"type": "procedure", "confidence": 0.85}
+
+        # Anatomy keywords
+        anatomy_keywords = ['nerve', 'artery', 'vein', 'muscle', 'bone', 'organ',
+                           'tissue', 'cell', 'gland', 'membrane']
+        for keyword in anatomy_keywords:
+            if keyword in entity_lower:
+                return {"type": "anatomy", "confidence": 0.75}
+
+        return {"type": "other", "confidence": 0.5}
+
+    def _infer_type_relationship(self, entity: str) -> Dict:
+        """Infer entity type using graph relationships"""
+        # Build relationship profile for this entity
+        incoming_relations = []
+        outgoing_relations = []
+
+        for head, rel, tail in self.triples:
+            if head == entity:
+                outgoing_relations.append(rel.lower())
+            if tail == entity:
+                incoming_relations.append(rel.lower())
+
+        # Relationship-based rules
+        drug_relations = ['treats', 'cures', 'prevents', 'inhibits', 'blocks',
+                         'prescribed for', 'used to treat']
+        disease_relations = ['caused by', 'treated by', 'symptom of', 'diagnosed as']
+        symptom_relations = ['symptom of', 'associated with', 'indicates']
+        procedure_relations = ['performed on', 'used to treat', 'surgical']
+
+        # Check outgoing relations (entity is subject)
+        for rel in outgoing_relations:
+            for drug_rel in drug_relations:
+                if drug_rel in rel:
+                    return {"type": "drug", "confidence": 0.80}
+
+        # Check incoming relations (entity is object)
+        for rel in incoming_relations:
+            for disease_rel in disease_relations:
+                if disease_rel in rel:
+                    return {"type": "disease", "confidence": 0.80}
+            for symptom_rel in symptom_relations:
+                if symptom_rel in rel:
+                    return {"type": "symptom", "confidence": 0.80}
+
+        return {"type": "other", "confidence": 0.5}
+
+    def _infer_type_hybrid(self, entity: str) -> Dict:
+        """Combine pattern and relationship methods"""
+        pattern_result = self._infer_type_pattern(entity)
+        relationship_result = self._infer_type_relationship(entity)
+
+        # If both agree, high confidence
+        if pattern_result["type"] == relationship_result["type"] and pattern_result["type"] != "other":
+            return {"type": pattern_result["type"], "confidence": 0.95}
+
+        # If pattern is confident, use it
+        if pattern_result["confidence"] >= 0.85:
+            return pattern_result
+
+        # If relationship is confident, use it
+        if relationship_result["confidence"] >= 0.80:
+            return relationship_result
+
+        # Otherwise use pattern (more reliable than "other")
+        if pattern_result["type"] != "other":
+            return pattern_result
+
+        if relationship_result["type"] != "other":
+            return relationship_result
+
+        return {"type": "other", "confidence": 0.5}
 
     def evaluate_stage0(self, entity_types: Dict) -> None:
         """Evaluate type inference quality"""
@@ -317,13 +459,23 @@ class EntityResolutionPipeline:
         logger.info(f"Batch size: {self.config.embedding_batch_size}")
         logger.info(f"Processing {len(self.entities)} entities...")
 
-        # TODO: Implement SapBERT embedding
-        # 1. Load SapBERT model
-        # 2. Batch encode entities
-        # 3. Save embeddings
+        # Load SapBERT model
+        from sentence_transformers import SentenceTransformer
 
-        # Placeholder: Random embeddings
-        embeddings = np.random.randn(len(self.entities), 768).astype(np.float32)
+        logger.info("Loading SapBERT model...")
+        model = SentenceTransformer(self.config.sapbert_model, device=self.config.embedding_device)
+
+        # Encode entities in batches
+        logger.info("Encoding entities...")
+        embeddings = model.encode(
+            self.entities,
+            batch_size=self.config.embedding_batch_size,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            normalize_embeddings=True  # L2 normalization for cosine similarity
+        )
+
+        logger.info(f"✅ Generated embeddings shape: {embeddings.shape}")
 
         # Save
         if self.config.save_intermediate:
@@ -382,14 +534,66 @@ class EntityResolutionPipeline:
         logger.info(f"Similarity threshold: {self.config.faiss_similarity_threshold}")
         logger.info(f"Processing {len(embeddings)} entities...")
 
-        # TODO: Implement FAISS blocking
-        # 1. Build FAISS index per entity type
-        # 2. Search K neighbors for each entity
-        # 3. Filter by similarity threshold
-        # 4. Prevent cross-type comparisons
+        # Build FAISS index per entity type to prevent cross-type comparisons
+        import faiss
 
-        # Placeholder: Random candidate pairs
         candidate_pairs = []
+
+        # Group entities by type
+        type_to_entities = {}
+        for entity_id, entity_name in enumerate(self.entities):
+            entity_type = entity_types[entity_name]["type"]
+            if entity_type not in type_to_entities:
+                type_to_entities[entity_type] = []
+            type_to_entities[entity_type].append(entity_id)
+
+        # Process each type separately
+        for entity_type, entity_ids in type_to_entities.items():
+            if len(entity_ids) < 2:
+                continue  # Need at least 2 entities to compare
+
+            logger.info(f"  Processing type '{entity_type}': {len(entity_ids)} entities")
+
+            # Get embeddings for this type
+            type_embeddings = embeddings[entity_ids].astype('float32')
+
+            # Build FAISS index
+            dim = type_embeddings.shape[1]
+            if len(entity_ids) < 100:
+                # For small datasets, use flat index (exact search)
+                index = faiss.IndexFlatIP(dim)  # Inner product (cosine similarity for normalized vectors)
+            else:
+                # For larger datasets, use HNSW (approximate search)
+                index = faiss.IndexHNSWFlat(dim, 32)  # 32 = M (number of connections)
+                index.hnsw.efConstruction = 40
+                index.hnsw.efSearch = 64
+
+            index.add(type_embeddings)
+
+            # Search k nearest neighbors for each entity
+            k = min(self.config.faiss_k_neighbors, len(entity_ids))
+            distances, indices = index.search(type_embeddings, k + 1)  # +1 to exclude self
+
+            # Convert to candidate pairs
+            for i, (dists, neighs) in enumerate(zip(distances, indices)):
+                entity1_id = entity_ids[i]
+
+                for dist, neigh_idx in zip(dists, neighs):
+                    if neigh_idx == i:  # Skip self
+                        continue
+
+                    entity2_id = entity_ids[neigh_idx]
+
+                    # Similarity = inner product (for normalized vectors, this is cosine similarity)
+                    similarity = float(dist)
+
+                    # Filter by threshold
+                    if similarity >= self.config.faiss_similarity_threshold:
+                        # Ensure consistent ordering (smaller ID first)
+                        if entity1_id < entity2_id:
+                            candidate_pairs.append((entity1_id, entity2_id, similarity))
+
+        logger.info(f"✅ Generated {len(candidate_pairs)} candidate pairs")
 
         # Save
         if self.config.save_intermediate:
