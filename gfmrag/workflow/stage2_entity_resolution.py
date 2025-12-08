@@ -36,6 +36,8 @@ import numpy as np
 from omegaconf import DictConfig
 from tqdm import tqdm
 
+from gfmrag.kg_construction.utils import KG_DELIMITER
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,7 +133,7 @@ class EntityResolutionPipeline:
         Args:
             kg_path: Path to kg.txt from Stage 1
 
-        Format: head\trelation\ttail
+        Format: head,relation,tail (using KG_DELIMITER from utils)
         """
         logger.info(f"Loading KG from: {kg_path}")
 
@@ -144,7 +146,7 @@ class EntityResolutionPipeline:
                 if not line:
                     continue
 
-                parts = line.split('\t')
+                parts = line.split(KG_DELIMITER)
                 if len(parts) != 3:
                     logger.warning(f"Line {line_num}: Invalid triple format (expected 3 parts, got {len(parts)})")
                     continue
@@ -175,11 +177,11 @@ class EntityResolutionPipeline:
         with open(output_path, 'w', encoding='utf-8') as f:
             # Write original triples
             for head, relation, tail in self.triples:
-                f.write(f"{head}\t{relation}\t{tail}\n")
+                f.write(f"{head}{KG_DELIMITER}{relation}{KG_DELIMITER}{tail}\n")
 
             # Write synonym edges
             for entity1, relation, entity2 in synonym_edges:
-                f.write(f"{entity1}\t{relation}\t{entity2}\n")
+                f.write(f"{entity1}{KG_DELIMITER}{relation}{KG_DELIMITER}{entity2}\n")
 
         logger.info(f"✅ Saved {len(self.triples)} original + {len(synonym_edges)} synonym edges")
 
