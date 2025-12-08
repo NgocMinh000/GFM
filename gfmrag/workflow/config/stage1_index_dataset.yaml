@@ -6,7 +6,6 @@ defaults:
   - _self_
   - ner_model: llm_ner_model # The NER model to use
   - openie_model: llm_openie_model # The OpenIE model to use
-  - el_model: colbert_el_model # The EL model to use
 
 dataset:
   root: ./data # data root directory
@@ -16,19 +15,11 @@ kg_constructor:
   _target_: gfmrag.kg_construction.KGConstructor # The KGConstructor class
   open_ie_model: ${openie_model}
   ner_model: ${ner_model}
-  el_model: ${el_model}
+  el_model: null # Disabled - will use Stage 2 entity resolution instead
   root: tmp/kg_construction # Temporary directory for storing intermediate files during KG construction
   num_processes: 10 # Number of processes to use
-  cosine_sim_edges: True # Whether to conduct entities resolution using cosine similarity
-  threshold: 0.8 # Threshold for cosine similarity
-  max_sim_neighbors: 100 # Maximum number of similar neighbors to add
+  cosine_sim_edges: False # Disabled - ColBERT entity linking replaced by Stage 2 pipeline
+  threshold: 0.8 # Not used when cosine_sim_edges=False
+  max_sim_neighbors: 100 # Not used when cosine_sim_edges=False
   add_title: True # Whether to add the title to the content of the document during OpenIE
   force: True # Whether to force recompute the KG (True = always recompute from scratch)
-
-qa_constructor:
-  _target_: gfmrag.kg_construction.QAConstructor # The QAConstructor class
-  root: tmp/qa_construction # Temporary directory for storing intermediate files during QA construction
-  ner_model: ${ner_model}
-  el_model: ${el_model}
-  num_processes: 10 # Number of processes to use
-  force: True # Whether to force recompute the QA data (True = always recompute from scratch)

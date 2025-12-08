@@ -1,0 +1,56 @@
+hydra:
+  run:
+    dir: outputs/entity_resolution/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Input/Output
+kg_input_path: ./data/hotpotqa/processed/kg.txt  # Output from Stage 1
+output_dir: tmp/entity_resolution  # Intermediate files for Stage 2
+
+# Stage 0: Type Inference
+type_inference:
+  method: hybrid  # pattern/relationship/hybrid
+
+# Stage 1: SapBERT Embedding
+sapbert:
+  model: cambridgeltl/SapBERT-from-PubMedBERT-fulltext
+  batch_size: 256
+  device: cuda  # cuda/cpu
+
+# Stage 2: FAISS Blocking
+faiss:
+  k_neighbors: 150  # Candidates per entity
+  similarity_threshold: 0.60
+  index_type: IndexHNSWFlat
+
+# Stage 3: Multi-Feature Scoring
+scoring:
+  feature_weights:
+    sapbert: 0.50      # SapBERT similarity
+    lexical: 0.25      # String similarity (edit distance, Jaccard)
+    type_consistency: 0.15  # Same type check
+    graph: 0.10        # Shared neighbors
+    umls: 0.0          # UMLS alignment (disabled)
+
+# Stage 4: Adaptive Thresholding
+thresholding:
+  type_thresholds:
+    drug: 0.86         # Strict - dosage sensitivity
+    disease: 0.82      # Medium
+    symptom: 0.77      # Lenient - high variation
+    procedure: 0.80
+    gene: 0.91         # Very strict
+    anatomy: 0.82
+    other: 0.80        # Default threshold
+
+# Stage 5: Clustering & Canonicalization
+clustering:
+  canonical_method: frequency  # frequency/length/umls
+  # Canonical selection priority:
+  # 1. Authoritative source (SNOMED, MeSH) if available
+  # 2. High corpus frequency
+  # 3. Good name quality (full form > abbreviation)
+
+# General
+num_processes: 10
+force: True  # Force recompute all stages
+save_intermediate: True  # Save outputs of each stage
