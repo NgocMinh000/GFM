@@ -3,7 +3,7 @@ hydra:
     dir: outputs/entity_resolution/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
 # Input/Output
-kg_input_path: ./data/hotpotqa/processed/kg.txt  # Output from Stage 1
+kg_input_path: ./data/hotpotqa/processed/stage1/kg.txt  # Output from Stage 1
 output_dir: tmp/entity_resolution  # Intermediate files for Stage 2
 
 # Stage 0: Type Inference
