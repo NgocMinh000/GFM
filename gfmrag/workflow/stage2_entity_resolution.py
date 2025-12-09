@@ -535,7 +535,20 @@ class EntityResolutionPipeline:
         logger.info(f"Processing {len(embeddings)} entities...")
 
         # Build FAISS index per entity type to prevent cross-type comparisons
-        import faiss
+        # Try to use GPU version first (faiss-gpu-cu12), fallback to CPU
+        try:
+            import faiss
+            # Check if GPU is available
+            if faiss.get_num_gpus() > 0:
+                logger.info(f"  Using FAISS GPU (found {faiss.get_num_gpus()} GPU(s))")
+                use_gpu = True
+            else:
+                logger.info("  Using FAISS CPU (no GPU available)")
+                use_gpu = False
+        except Exception as e:
+            logger.warning(f"  FAISS GPU not available ({e}), using CPU version")
+            import faiss
+            use_gpu = False
 
         candidate_pairs = []
 
