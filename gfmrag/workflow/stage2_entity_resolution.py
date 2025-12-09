@@ -677,15 +677,77 @@ class EntityResolutionPipeline:
         logger.info(f"Feature weights: {self.config.feature_weights}")
         logger.info(f"Processing {len(candidate_pairs)} pairs...")
 
-        # TODO: Implement multi-feature scoring
-        # Features:
-        # 1. SapBERT similarity (from blocking)
-        # 2. Lexical similarity (edit distance, Jaccard, etc.)
-        # 3. Type consistency (same type = 1.0, else 0.0)
-        # 4. Graph similarity (shared neighbors)
-        # 5. UMLS alignment (disabled = 0.0)
+        # Build graph neighbor cache for efficiency
+        entity_neighbors = {}
+        for entity in self.entities:
+            neighbors = set()
+            for head, rel, tail in self.triples:
+                if head == entity:
+                    neighbors.add(tail)
+                if tail == entity:
+                    neighbors.add(head)
+            entity_neighbors[entity] = neighbors
 
         scored_pairs = []
+
+        for e1_id, e2_id, sapbert_sim in tqdm(candidate_pairs, desc="Scoring pairs"):
+            entity1 = self.id_to_entity[e1_id]
+            entity2 = self.id_to_entity[e2_id]
+
+            # Feature 1: SapBERT similarity (already computed)
+            sapbert_score = float(sapbert_sim)
+
+            # Feature 2: Lexical similarity (normalized edit distance)
+            max_len = max(len(entity1), len(entity2))
+            if max_len == 0:
+                lexical_score = 1.0
+            else:
+                # Simple character-level edit distance
+                edit_dist = self._levenshtein_distance(entity1.lower(), entity2.lower())
+                lexical_score = 1.0 - (edit_dist / max_len)
+
+            # Feature 3: Type consistency
+            type1 = entity_types[entity1]["type"]
+            type2 = entity_types[entity2]["type"]
+            type_consistency_score = 1.0 if type1 == type2 else 0.0
+
+            # Feature 4: Graph similarity (Jaccard similarity of neighbors)
+            neighbors1 = entity_neighbors.get(entity1, set())
+            neighbors2 = entity_neighbors.get(entity2, set())
+            if len(neighbors1) + len(neighbors2) > 0:
+                shared = len(neighbors1 & neighbors2)
+                total = len(neighbors1 | neighbors2)
+                graph_score = shared / total if total > 0 else 0.0
+            else:
+                graph_score = 0.0
+
+            # Feature 5: UMLS alignment (placeholder - disabled)
+            umls_score = 0.0
+
+            # Weighted combination
+            weights = self.config.feature_weights
+            final_score = (
+                weights["sapbert"] * sapbert_score +
+                weights["lexical"] * lexical_score +
+                weights["type_consistency"] * type_consistency_score +
+                weights["graph"] * graph_score +
+                weights["umls"] * umls_score
+            )
+
+            scored_pairs.append({
+                "entity1_id": e1_id,
+                "entity2_id": e2_id,
+                "entity1_name": entity1,
+                "entity2_name": entity2,
+                "sapbert": sapbert_score,
+                "lexical": lexical_score,
+                "type_consistency": type_consistency_score,
+                "graph": graph_score,
+                "umls": umls_score,
+                "final_score": final_score
+            })
+
+        logger.info(f"✅ Scored {len(scored_pairs)} pairs")
 
         # Save
         if self.config.save_intermediate:
@@ -698,6 +760,27 @@ class EntityResolutionPipeline:
         self.evaluate_stage3(scored_pairs)
 
         return scored_pairs
+
+    def _levenshtein_distance(self, s1: str, s2: str) -> int:
+        """Calculate Levenshtein edit distance between two strings"""
+        if len(s1) < len(s2):
+            return self._levenshtein_distance(s2, s1)
+
+        if len(s2) == 0:
+            return len(s1)
+
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                # Cost of insertions, deletions, or substitutions
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+
+        return previous_row[-1]
 
     def evaluate_stage3(self, scored_pairs: List[Dict]) -> None:
         """Evaluate scoring quality"""
@@ -745,12 +828,23 @@ class EntityResolutionPipeline:
         logger.info(f"Type-specific thresholds: {self.config.type_thresholds}")
         logger.info(f"Processing {len(scored_pairs)} scored pairs...")
 
-        # TODO: Implement adaptive thresholding
-        # 1. Get entity type for each pair
-        # 2. Apply type-specific threshold
-        # 3. Keep pairs above threshold
-
         equivalent_pairs = []
+
+        for pair in tqdm(scored_pairs, desc="Thresholding"):
+            entity1 = pair["entity1_name"]
+            entity2 = pair["entity2_name"]
+
+            # Get entity type (both should be same type after blocking)
+            entity_type = entity_types[entity1]["type"]
+
+            # Get type-specific threshold (default to 0.80 if type not found)
+            threshold = self.config.type_thresholds.get(entity_type, 0.80)
+
+            # Apply threshold
+            if pair["final_score"] >= threshold:
+                equivalent_pairs.append((pair["entity1_id"], pair["entity2_id"]))
+
+        logger.info(f"✅ Found {len(equivalent_pairs)} equivalent pairs")
 
         # Save
         if self.config.save_intermediate:
@@ -823,14 +917,73 @@ class EntityResolutionPipeline:
         logger.info(f"Method: {self.config.canonical_selection_method}")
         logger.info(f"Processing {len(equivalent_pairs)} equivalent pairs...")
 
-        # TODO: Implement clustering & canonicalization
-        # 1. Union-Find clustering
-        # 2. Select canonical name per cluster
-        # 3. Generate SYNONYM_OF edges
+        # Union-Find data structure for clustering
+        parent = {}
 
-        clusters = {}
+        def find(x):
+            """Find root of element x with path compression"""
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])  # Path compression
+            return parent[x]
+
+        def union(x, y):
+            """Union two elements"""
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+
+        # Build clusters using Union-Find
+        for e1_id, e2_id in equivalent_pairs:
+            union(e1_id, e2_id)
+
+        # Group entities by cluster root
+        clusters_dict = {}
+        for entity_id in range(len(self.entities)):
+            root = find(entity_id)
+            if root not in clusters_dict:
+                clusters_dict[root] = []
+            clusters_dict[root].append(entity_id)
+
+        # Filter out singleton clusters (only 1 entity)
+        clusters = {str(root): entity_ids for root, entity_ids in clusters_dict.items() if len(entity_ids) > 1}
+
+        # Select canonical name for each cluster
         canonical_names = {}
         synonym_edges = []
+
+        for cluster_id, entity_ids in clusters.items():
+            entity_names = [self.id_to_entity[eid] for eid in entity_ids]
+
+            # Count frequency of each entity in the knowledge graph
+            name_freq = {name: 0 for name in entity_names}
+            for head, rel, tail in self.triples:
+                if head in name_freq:
+                    name_freq[head] += 1
+                if tail in name_freq:
+                    name_freq[tail] += 1
+
+            # Select canonical name based on method
+            if self.config.canonical_selection_method == "frequency":
+                # Most frequent in corpus
+                canonical_name = max(entity_names, key=lambda n: name_freq[n])
+            elif self.config.canonical_selection_method == "length":
+                # Shortest name (often more concise)
+                canonical_name = min(entity_names, key=len)
+            else:  # Default to frequency
+                canonical_name = max(entity_names, key=lambda n: name_freq[n])
+
+            # Get canonical entity ID
+            canonical_id = self.entity_to_id[canonical_name]
+            canonical_names[cluster_id] = canonical_id
+
+            # Create SYNONYM_OF edges
+            for name in entity_names:
+                if name != canonical_name:
+                    synonym_edges.append((name, "SYNONYM_OF", canonical_name))
+
+        logger.info(f"✅ Created {len(synonym_edges)} SYNONYM_OF edges from {len(clusters)} clusters")
 
         # Save
         if self.config.save_intermediate:
