@@ -2,19 +2,30 @@
 
 ## 🎉 All 6 Sub-Stages Implemented!
 
-### ✅ Stage 0: Type Inference
-**Status:** Production-ready
+### ✅ Stage 0: Enhanced Type Inference (4-Step Hybrid)
+**Status:** Production-ready ⭐ ENHANCED
 
-**Implementation:**
-- Pattern-based: Regex for medical suffixes (-itis, -oma, -cin, -olol, etc.)
-- Relationship-based: Infer from graph edges (treats→drug, symptom of→symptom)
-- Hybrid: Combines both with confidence scoring
+**Implementation:** Sophisticated 4-step hybrid approach
+- **Step 1:** Pattern-based - Regex for medical suffixes (-itis, -oma, -cin, -olol, etc.)
+- **Step 2:** Relationship-based with LLM - Uses gpt-4o-mini via YEScale to analyze graph relationships
+- **Step 3:** Zero-shot classification - BART-large-mnli for direct name classification
+- **Step 4:** Hybrid decision logic - Sophisticated decision tree combining all 3 methods
+
+**Features:**
+- Model caching (LLM + zero-shot classifier)
+- Deduplication to avoid reprocessing
+- Method tracking (which method classified each entity)
+- Graceful error handling with fallbacks
+- GPU/CPU support for zero-shot
 
 **Output:**
 - 7 entity types: drug, disease, symptom, gene, procedure, anatomy, other
-- Confidence scores: 0.5-0.95
+- Confidence scores: 0.3-0.95
+- Method used: pattern, relationship_llm, zeroshot, unanimous, majority_vote, etc.
 
-**Code:** Lines 226-414 in `stage2_entity_resolution.py`
+**Code:** Lines 226-667 in `stage2_entity_resolution.py`
+
+**See:** [STAGE0_ENHANCED.md](STAGE0_ENHANCED.md) for detailed documentation
 
 ---
 
@@ -131,15 +142,22 @@ final_score = 0.50 * sapbert + 0.25 * lexical + 0.15 * type + 0.10 * graph + 0.0
 
 ### Runtime (679 entities, GPU)
 ```
-Stage 0: Type Inference          ~2-3s
+Stage 0: Enhanced Type Inference ~200-240s (LLM API calls for relationships)
+         - Pattern:              ~2s
+         - Relationship-LLM:     ~200s (679 × 300ms API latency)
+         - Zero-shot:            ~35s (GPU)
+         - Hybrid decision:      ~1s
 Stage 1: SapBERT Embedding       ~10-15s (model download once)
 Stage 2: FAISS Blocking          ~2-5s
 Stage 3: Multi-Feature Scoring   ~30-60s (graph similarity expensive)
 Stage 4: Adaptive Thresholding   ~1-2s
 Stage 5: Clustering              ~2-5s
 ──────────────────────────────────────
-Total:                           ~50-90s
+Total:                           ~245-330s (~4-5.5 minutes)
 ```
+
+**Note:** Stage 0 LLM step (Step 2) can be parallelized or batched for speedup.
+Alternative: Skip LLM step by setting relationship confidence threshold higher in hybrid logic.
 
 ### Quality Metrics (Medical Domain)
 ```
