@@ -225,13 +225,19 @@ class EntityResolutionPipeline:
 
     def stage0_type_inference(self) -> Dict[str, Dict]:
         """
-        Classify entity types (drug, disease, symptom, etc.)
+        Classify entity types using enhanced 4-step hybrid approach.
+
+        Architecture:
+        Step 1: Pattern-Based (regex)
+        Step 2: Relationship-Based with LLM
+        Step 3: Zero-shot Classification
+        Step 4: Hybrid Decision Logic
 
         Returns:
-            dict: {entity_name: {"type": str, "confidence": float}}
+            dict: {entity_name: {"type": str, "confidence": float, "method": str}}
         """
         logger.info("\n" + "="*80)
-        logger.info("STAGE 0: TYPE INFERENCE")
+        logger.info("STAGE 0: ENHANCED TYPE INFERENCE (4-Step Hybrid)")
         logger.info("="*80)
 
         output_path = self.stage_paths["stage0_types"]
@@ -245,18 +251,35 @@ class EntityResolutionPipeline:
             return entity_types
 
         logger.info(f"Method: {self.config.type_inference_method}")
-        logger.info(f"Processing {len(self.entities)} entities...")
+        logger.info(f"Processing {len(self.entities)} unique entities...")
+        logger.info("Architecture: Pattern → Relationship-LLM → Zero-shot → Hybrid Decision")
 
         entity_types = {}
-        method = self.config.type_inference_method
 
-        for entity in tqdm(self.entities, desc="Type inference"):
-            if method == "pattern":
-                entity_types[entity] = self._infer_type_pattern(entity)
-            elif method == "relationship":
-                entity_types[entity] = self._infer_type_relationship(entity)
-            else:  # hybrid
-                entity_types[entity] = self._infer_type_hybrid(entity)
+        # Process each entity with 4-step approach
+        for entity in tqdm(self.entities, desc="Type inference (4-step)"):
+            # Skip if already processed (deduplication)
+            if entity in entity_types:
+                continue
+
+            # Step 1: Pattern-Based
+            pattern_result = self._infer_type_pattern(entity)
+
+            # Step 2: Relationship-Based with LLM
+            relationship_result = self._infer_type_relationship_llm(entity)
+
+            # Step 3: Zero-shot Classification
+            zeroshot_result = self._infer_type_zeroshot(entity)
+
+            # Step 4: Hybrid Decision Logic
+            final_result = self._hybrid_decision(
+                entity,
+                pattern_result,
+                relationship_result,
+                zeroshot_result
+            )
+
+            entity_types[entity] = final_result
 
         # Save
         if self.config.save_intermediate:
@@ -351,6 +374,298 @@ class EntityResolutionPipeline:
 
         return {"type": "other", "confidence": 0.5}
 
+    def _infer_type_relationship_llm(self, entity: str) -> Dict:
+        """
+        Infer entity type using LLM analysis of graph relationships.
+
+        Step 2: Relationship-Based with LLM
+        - Extracts all relationships for the entity
+        - Sends to gpt-4o-mini via YEScale API
+        - LLM analyzes relationships and infers type
+
+        Args:
+            entity: Entity name
+
+        Returns:
+            dict: {"type": str, "confidence": float}
+        """
+        # Extract relationships for this entity
+        incoming_relations = []
+        outgoing_relations = []
+
+        for head, rel, tail in self.triples:
+            if head == entity:
+                outgoing_relations.append(f"{entity} --[{rel}]--> {tail}")
+            if tail == entity:
+                incoming_relations.append(f"{head} --[{rel}]--> {entity}")
+
+        # If no relationships, return low confidence "other"
+        if not incoming_relations and not outgoing_relations:
+            return {"type": "other", "confidence": 0.3}
+
+        # Build context for LLM
+        relationship_context = ""
+        if outgoing_relations:
+            relationship_context += "Outgoing relationships:\n" + "\n".join(outgoing_relations[:10])
+        if incoming_relations:
+            if outgoing_relations:
+                relationship_context += "\n\n"
+            relationship_context += "Incoming relationships:\n" + "\n".join(incoming_relations[:10])
+
+        # Prompt for LLM
+        prompt = f"""You are a medical entity type classifier. Analyze the following entity and its relationships in a medical knowledge graph.
+
+Entity: "{entity}"
+
+{relationship_context}
+
+Based on these relationships, classify the entity into ONE of these types:
+- drug: medications, pharmaceuticals, therapeutic compounds
+- disease: illnesses, conditions, syndromes, infections
+- symptom: clinical signs, patient complaints, manifestations
+- gene: genes, proteins, genetic markers
+- procedure: medical procedures, surgeries, treatments, therapies
+- anatomy: body parts, organs, tissues, cells
+- other: if none of the above fit well
+
+Respond in this EXACT JSON format (no extra text):
+{{"type": "...", "confidence": 0.XX, "reasoning": "..."}}
+
+Where confidence is 0.0-1.0 (how certain you are about this classification).
+"""
+
+        try:
+            # Initialize YEScale model
+            from gfmrag.kg_construction.yescale_chat_model import create_yescale_model
+
+            # Cache the model at class level to avoid re-initialization
+            if not hasattr(self, '_llm_cache'):
+                self._llm_cache = create_yescale_model(
+                    model="gpt-4o-mini",
+                    temperature=0.0,
+                )
+
+            llm = self._llm_cache
+
+            # Get LLM response
+            from langchain_core.messages import HumanMessage
+            response = llm.invoke([HumanMessage(content=prompt)])
+            response_text = response.content.strip()
+
+            # Parse JSON response
+            import json
+            # Extract JSON from response (in case there's extra text)
+            if "{" in response_text and "}" in response_text:
+                json_start = response_text.index("{")
+                json_end = response_text.rindex("}") + 1
+                json_str = response_text[json_start:json_end]
+                result = json.loads(json_str)
+
+                entity_type = result.get("type", "other")
+                confidence = float(result.get("confidence", 0.5))
+
+                # Validate type
+                valid_types = {"drug", "disease", "symptom", "gene", "procedure", "anatomy", "other"}
+                if entity_type not in valid_types:
+                    entity_type = "other"
+
+                # Clamp confidence to [0, 1]
+                confidence = max(0.0, min(1.0, confidence))
+
+                return {"type": entity_type, "confidence": confidence}
+            else:
+                # Failed to parse, return low confidence
+                return {"type": "other", "confidence": 0.3}
+
+        except Exception as e:
+            logger.warning(f"LLM inference failed for entity '{entity}': {e}")
+            return {"type": "other", "confidence": 0.3}
+
+    def _infer_type_zeroshot(self, entity: str) -> Dict:
+        """
+        Infer entity type using zero-shot classification.
+
+        Step 3: Zero-shot Classification
+        - Uses transformers pipeline with BART-large-mnli
+        - Classifies entity name directly without fine-tuning
+        - Returns type and confidence score
+
+        Args:
+            entity: Entity name
+
+        Returns:
+            dict: {"type": str, "confidence": float}
+        """
+        try:
+            from transformers import pipeline
+
+            # Cache the classifier at class level to avoid re-initialization
+            if not hasattr(self, '_zeroshot_classifier'):
+                # Use BART-large-mnli for zero-shot classification
+                # Alternative: facebook/bart-large-mnli, microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract
+                self._zeroshot_classifier = pipeline(
+                    "zero-shot-classification",
+                    model="facebook/bart-large-mnli",
+                    device=0 if self.config.embedding_device == "cuda" else -1
+                )
+
+            classifier = self._zeroshot_classifier
+
+            # Candidate labels with detailed descriptions
+            candidate_labels = [
+                "drug medication pharmaceutical",
+                "disease illness condition syndrome",
+                "symptom sign manifestation",
+                "gene protein genetic marker",
+                "medical procedure surgery treatment",
+                "anatomy body part organ tissue",
+                "other entity"
+            ]
+
+            # Classify
+            result = classifier(entity, candidate_labels)
+
+            # Extract top prediction
+            top_label = result['labels'][0]
+            top_score = result['scores'][0]
+
+            # Map label to entity type
+            label_mapping = {
+                "drug medication pharmaceutical": "drug",
+                "disease illness condition syndrome": "disease",
+                "symptom sign manifestation": "symptom",
+                "gene protein genetic marker": "gene",
+                "medical procedure surgery treatment": "procedure",
+                "anatomy body part organ tissue": "anatomy",
+                "other entity": "other"
+            }
+
+            entity_type = label_mapping.get(top_label, "other")
+            confidence = float(top_score)
+
+            return {"type": entity_type, "confidence": confidence}
+
+        except Exception as e:
+            logger.warning(f"Zero-shot classification failed for entity '{entity}': {e}")
+            return {"type": "other", "confidence": 0.3}
+
+    def _hybrid_decision(
+        self,
+        entity: str,
+        pattern_result: Dict,
+        relationship_result: Dict,
+        zeroshot_result: Dict
+    ) -> Dict:
+        """
+        Combine results from all 3 methods using decision logic.
+
+        Step 4: Hybrid Decision Logic
+        Decision tree:
+        1. High pattern confidence (>0.75) → use pattern
+        2. High relationship confidence (>0.7) → use relationship
+        3. All 3 agree → use agreed type with averaged confidence
+        4. 2/3 agree → use majority vote with averaged confidence
+        5. Conflict → prefer pattern if confident, else relationship
+        6. All low confidence → use zero-shot or mark "unknown"
+
+        Args:
+            entity: Entity name
+            pattern_result: {"type": str, "confidence": float}
+            relationship_result: {"type": str, "confidence": float}
+            zeroshot_result: {"type": str, "confidence": float}
+
+        Returns:
+            dict: {"type": str, "confidence": float, "method": str}
+        """
+        p_type = pattern_result["type"]
+        p_conf = pattern_result["confidence"]
+        r_type = relationship_result["type"]
+        r_conf = relationship_result["confidence"]
+        z_type = zeroshot_result["type"]
+        z_conf = zeroshot_result["confidence"]
+
+        # Decision 1: High pattern confidence (>0.75)
+        if p_conf > 0.75 and p_type != "other":
+            return {
+                "type": p_type,
+                "confidence": p_conf,
+                "method": "pattern"
+            }
+
+        # Decision 2: High relationship confidence (>0.7)
+        if r_conf > 0.7 and r_type != "other":
+            return {
+                "type": r_type,
+                "confidence": r_conf,
+                "method": "relationship_llm"
+            }
+
+        # Decision 3: All 3 agree
+        if p_type == r_type == z_type and p_type != "other":
+            avg_conf = (p_conf + r_conf + z_conf) / 3
+            return {
+                "type": p_type,
+                "confidence": min(0.95, avg_conf + 0.1),  # Boost confidence for agreement
+                "method": "unanimous"
+            }
+
+        # Decision 4: 2/3 agree (majority vote)
+        votes = [p_type, r_type, z_type]
+        vote_counts = {}
+        for vote in votes:
+            vote_counts[vote] = vote_counts.get(vote, 0) + 1
+
+        # Find majority (at least 2 votes)
+        for vote_type, count in vote_counts.items():
+            if count >= 2 and vote_type != "other":
+                # Average confidence of methods that voted for this type
+                confidences = []
+                if p_type == vote_type:
+                    confidences.append(p_conf)
+                if r_type == vote_type:
+                    confidences.append(r_conf)
+                if z_type == vote_type:
+                    confidences.append(z_conf)
+
+                avg_conf = sum(confidences) / len(confidences)
+                return {
+                    "type": vote_type,
+                    "confidence": avg_conf,
+                    "method": "majority_vote"
+                }
+
+        # Decision 5: Conflict - prefer pattern if confident, else relationship
+        if p_type != "other" and p_conf >= 0.6:
+            return {
+                "type": p_type,
+                "confidence": p_conf,
+                "method": "pattern_fallback"
+            }
+
+        if r_type != "other" and r_conf >= 0.5:
+            return {
+                "type": r_type,
+                "confidence": r_conf,
+                "method": "relationship_fallback"
+            }
+
+        # Decision 6: All methods failed or low confidence - use zero-shot or "other"
+        if z_type != "other" and z_conf >= 0.5:
+            return {
+                "type": z_type,
+                "confidence": z_conf,
+                "method": "zeroshot_fallback"
+            }
+
+        # Last resort: choose the one with highest confidence
+        max_conf = max(p_conf, r_conf, z_conf)
+        if max_conf == p_conf:
+            return {"type": p_type, "confidence": p_conf, "method": "pattern_last_resort"}
+        elif max_conf == r_conf:
+            return {"type": r_type, "confidence": r_conf, "method": "relationship_last_resort"}
+        else:
+            return {"type": z_type, "confidence": z_conf, "method": "zeroshot_last_resort"}
+
     def _infer_type_relationship(self, entity: str) -> Dict:
         """Infer entity type using graph relationships"""
         # Build relationship profile for this entity
@@ -428,6 +743,14 @@ class EntityResolutionPipeline:
 
         avg_confidence = np.mean([e["confidence"] for e in entity_types.values()])
         logger.info(f"  Average confidence: {avg_confidence:.3f}")
+
+        # Show method distribution (if "method" field exists in results)
+        if entity_types and "method" in next(iter(entity_types.values())):
+            method_counts = Counter(e["method"] for e in entity_types.values())
+            logger.info(f"  Method distribution:")
+            for method_name, count in method_counts.most_common():
+                percentage = 100 * count / len(entity_types)
+                logger.info(f"    - {method_name}: {count} ({percentage:.1f}%)")
 
     # ========================================================================
     # STAGE 1: SAPBERT EMBEDDING
