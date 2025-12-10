@@ -35,8 +35,12 @@ import hydra
 import numpy as np
 from omegaconf import DictConfig
 from tqdm import tqdm
+from dotenv import load_dotenv
 
 from gfmrag.kg_construction.utils import KG_DELIMITER
+
+# Load environment variables from .env file
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +62,8 @@ class EntityResolutionConfig:
     embedding_device: str = "cuda"  # cuda/cpu
 
     # Stage 2: FAISS Blocking
-    faiss_k_neighbors: int = 150  # Candidates per entity
-    faiss_similarity_threshold: float = 0.60
+    faiss_k_neighbors: int = 50  # Candidates per entity
+    faiss_similarity_threshold: float = 0.80
     faiss_index_type: str = "IndexHNSWFlat"  # Fast approximate search
 
     # Stage 3: Multi-Feature Scoring
@@ -223,6 +227,58 @@ class EntityResolutionPipeline:
     # STAGE 0: TYPE INFERENCE
     # ========================================================================
 
+    def _batch_process_llm_step2(self, entities: List[str]) -> Dict[str, Dict]:
+        """
+        Batch process Step 2 LLM relationship inference in parallel.
+
+        Uses ThreadPoolExecutor to process multiple entities concurrently.
+        Loads BATCH_SIZE and MAX_WORKERS from environment variables.
+
+        Args:
+            entities: List of entity names to process
+
+        Returns:
+            dict: {entity_name: {"type": str, "confidence": float}}
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Load parallel processing config from environment
+        batch_size = int(os.environ.get("BATCH_SIZE", "15"))
+        max_workers = int(os.environ.get("MAX_WORKERS", "15"))
+
+        logger.info(f"Step 2 LLM Parallel Processing: BATCH_SIZE={batch_size}, MAX_WORKERS={max_workers}")
+
+        results = {}
+
+        # Process in batches
+        total_batches = (len(entities) + batch_size - 1) // batch_size
+
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(entities))
+            batch = entities[start_idx:end_idx]
+
+            # Process batch in parallel
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_entity = {
+                    executor.submit(self._infer_type_relationship_llm, entity): entity
+                    for entity in batch
+                }
+
+                # Collect results as they complete
+                for future in as_completed(future_to_entity):
+                    entity = future_to_entity[future]
+                    try:
+                        result = future.result()
+                        results[entity] = result
+                    except Exception as e:
+                        logger.warning(f"Parallel LLM failed for '{entity}': {e}")
+                        results[entity] = {"type": "other", "confidence": 0.3}
+
+        logger.info(f"✅ Completed parallel LLM processing for {len(results)} entities")
+        return results
+
     def stage0_type_inference(self) -> Dict[str, Dict]:
         """
         Classify entity types using enhanced 4-step hybrid approach.
@@ -252,9 +308,13 @@ class EntityResolutionPipeline:
 
         logger.info(f"Method: {self.config.type_inference_method}")
         logger.info(f"Processing {len(self.entities)} unique entities...")
-        logger.info("Architecture: Pattern → Relationship-LLM → Zero-shot → Hybrid Decision")
+        logger.info("Architecture: Pattern → Relationship-LLM (parallel) → Zero-shot → Hybrid Decision")
 
         entity_types = {}
+
+        # Pre-compute Step 2 (LLM) in parallel for all entities
+        logger.info("Pre-computing Step 2 (Relationship-LLM) in parallel...")
+        llm_results = self._batch_process_llm_step2(self.entities)
 
         # Process each entity with 4-step approach
         for entity in tqdm(self.entities, desc="Type inference (4-step)"):
@@ -265,8 +325,8 @@ class EntityResolutionPipeline:
             # Step 1: Pattern-Based
             pattern_result = self._infer_type_pattern(entity)
 
-            # Step 2: Relationship-Based with LLM
-            relationship_result = self._infer_type_relationship_llm(entity)
+            # Step 2: Relationship-Based with LLM (use pre-computed result)
+            relationship_result = llm_results.get(entity, {"type": "other", "confidence": 0.3})
 
             # Step 3: Zero-shot Classification
             zeroshot_result = self._infer_type_zeroshot(entity)
@@ -907,14 +967,19 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
             # Build FAISS index
             dim = type_embeddings.shape[1]
+            use_inner_product = False
+
             if len(entity_ids) < 100:
                 # For small datasets, use flat index (exact search)
                 index = faiss.IndexFlatIP(dim)  # Inner product (cosine similarity for normalized vectors)
+                use_inner_product = True
             else:
                 # For larger datasets, use HNSW (approximate search)
+                # Note: IndexHNSWFlat uses L2 distance, not inner product
                 index = faiss.IndexHNSWFlat(dim, 32)  # 32 = M (number of connections)
                 index.hnsw.efConstruction = 40
                 index.hnsw.efSearch = 64
+                use_inner_product = False
 
             index.add(type_embeddings)
 
@@ -932,9 +997,19 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
                     entity2_id = entity_ids[neigh_idx]
 
-                    # Similarity = inner product (for normalized vectors, this is cosine similarity)
+                    # Convert distance to cosine similarity
+                    if use_inner_product:
+                        # IndexFlatIP returns inner product (already cosine similarity for normalized vectors)
+                        similarity = float(dist)
+                    else:
+                        # IndexHNSWFlat returns L2 distance
+                        # For normalized vectors: L2^2 = 2 - 2*cosine_sim
+                        # So: cosine_sim = 1 - (L2^2 / 2)
+                        l2_dist_squared = dist * dist
+                        similarity = 1.0 - (l2_dist_squared / 2.0)
+
                     # Clamp to [0, 1] to handle numerical precision issues
-                    similarity = float(np.clip(dist, 0.0, 1.0))
+                    similarity = float(np.clip(similarity, 0.0, 1.0))
 
                     # Filter by threshold
                     if similarity >= self.config.faiss_similarity_threshold:
