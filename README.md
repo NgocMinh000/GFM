@@ -31,5 +31,5 @@ conda remove --force faiss -y
 pip install faiss-cpu==1.9.0
 
 # Chạy workflow tạo BKG
-cd ~/gfm-rag
+cd ~/GFM
 python -m gfmrag.workflow.stage1_index_dataset
