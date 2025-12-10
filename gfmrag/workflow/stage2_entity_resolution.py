@@ -435,69 +435,78 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 """
 
         try:
-            # Initialize LLM model with proper env var validation
+            # Initialize LLM model using langchain_util (same as OpenIE)
             if not hasattr(self, '_llm_cache'):
                 import os
+                from gfmrag.kg_construction.langchain_util import init_langchain_model
 
-                # Check for YEScale API credentials
+                # Check if YEScale or OpenAI configured
                 yescale_url = os.environ.get("YESCALE_API_BASE_URL")
-                yescale_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+                api_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
 
-                if not yescale_url or not yescale_key:
+                if not api_key:
                     logger.warning(
-                        "YEScale API not configured (YESCALE_API_BASE_URL or YESCALE_API_KEY missing). "
+                        "LLM API not configured (YESCALE_API_KEY or OPENAI_API_KEY missing). "
                         "Skipping LLM-based relationship inference. "
-                        "Set YESCALE_API_BASE_URL and YESCALE_API_KEY environment variables to enable."
+                        "Set YESCALE_API_BASE_URL and YESCALE_API_KEY to use YEScale, "
+                        "or set OPENAI_API_KEY to use OpenAI."
                     )
-                    # Set flag to skip LLM calls entirely
                     self._llm_cache = None
                 else:
-                    # Use YEScale API
-                    from gfmrag.kg_construction.yescale_chat_model import YEScaleChatModel
-
-                    self._llm_cache = YEScaleChatModel(
-                        api_url=yescale_url,
-                        api_key=yescale_key,
-                        model="gpt-4o-mini",
+                    # Use init_langchain_model - auto-detects YEScale or OpenAI
+                    self._llm_cache = init_langchain_model(
+                        llm="openai",  # Will use YEScale if YESCALE_API_BASE_URL is set
+                        model_name="gpt-4o-mini",
                         temperature=0.0,
                     )
-                    logger.info(f"✅ Initialized YEScale LLM for relationship inference: {yescale_url}")
+                    if yescale_url:
+                        logger.info(f"✅ Initialized YEScale LLM for relationship inference: {yescale_url}")
+                    else:
+                        logger.info("✅ Initialized OpenAI LLM for relationship inference")
 
             # If LLM not available, return low confidence "other"
             if self._llm_cache is None:
                 return {"type": "other", "confidence": 0.3}
 
+            # Get LLM response (follow llm_openie_model.py pattern)
+            from langchain_core.messages import HumanMessage
+            from langchain_openai import ChatOpenAI
+            from gfmrag.kg_construction.utils import extract_json_dict
+            import json
+
             llm = self._llm_cache
 
-            # Get LLM response
-            from langchain_core.messages import HumanMessage
-            response = llm.invoke([HumanMessage(content=prompt)])
-            response_text = response.content.strip()
-
-            # Parse JSON response
-            import json
-            # Extract JSON from response (in case there's extra text)
-            if "{" in response_text and "}" in response_text:
-                json_start = response_text.index("{")
-                json_end = response_text.rindex("}") + 1
-                json_str = response_text[json_start:json_end]
-                result = json.loads(json_str)
-
-                entity_type = result.get("type", "other")
-                confidence = float(result.get("confidence", 0.5))
-
-                # Validate type
-                valid_types = {"drug", "disease", "symptom", "gene", "procedure", "anatomy", "other"}
-                if entity_type not in valid_types:
-                    entity_type = "other"
-
-                # Clamp confidence to [0, 1]
-                confidence = max(0.0, min(1.0, confidence))
-
-                return {"type": entity_type, "confidence": confidence}
+            if isinstance(llm, ChatOpenAI):
+                # OpenAI: Use JSON mode (reliable)
+                response = llm.invoke(
+                    [HumanMessage(content=prompt)],
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                response_content = response.content
+                result = eval(response_content)
             else:
-                # Failed to parse, return low confidence
-                return {"type": "other", "confidence": 0.3}
+                # YEScale or other models: Parse JSON manually
+                response = llm.invoke(
+                    [HumanMessage(content=prompt)],
+                    temperature=0,
+                )
+                response_content = response.content
+                result = extract_json_dict(response_content)
+
+            # Extract and validate
+            entity_type = result.get("type", "other")
+            confidence = float(result.get("confidence", 0.5))
+
+            # Validate type
+            valid_types = {"drug", "disease", "symptom", "gene", "procedure", "anatomy", "other"}
+            if entity_type not in valid_types:
+                entity_type = "other"
+
+            # Clamp confidence to [0, 1]
+            confidence = max(0.0, min(1.0, confidence))
+
+            return {"type": entity_type, "confidence": confidence}
 
         except Exception as e:
             logger.warning(f"LLM inference failed for entity '{entity}': {e}")
