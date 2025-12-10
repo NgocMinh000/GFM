@@ -435,13 +435,14 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 """
 
         try:
-            # Initialize YEScale model
-            from gfmrag.kg_construction.yescale_chat_model import create_yescale_model
+            # Initialize LLM model (YEScale or OpenAI)
+            from gfmrag.kg_construction.langchain_util import init_langchain_model
 
             # Cache the model at class level to avoid re-initialization
             if not hasattr(self, '_llm_cache'):
-                self._llm_cache = create_yescale_model(
-                    model="gpt-4o-mini",
+                self._llm_cache = init_langchain_model(
+                    llm="openai",  # Will use YEScale if YESCALE_API_BASE_URL is set, else OpenAI
+                    model_name="gpt-4o-mini",
                     temperature=0.0,
                 )
 
@@ -557,16 +558,17 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         zeroshot_result: Dict
     ) -> Dict:
         """
-        Combine results from all 3 methods using decision logic.
+        Combine results from all 3 methods using weighted voting.
 
-        Step 4: Hybrid Decision Logic
-        Decision tree:
-        1. High pattern confidence (>0.75) → use pattern
-        2. High relationship confidence (>0.7) → use relationship
-        3. All 3 agree → use agreed type with averaged confidence
-        4. 2/3 agree → use majority vote with averaged confidence
-        5. Conflict → prefer pattern if confident, else relationship
-        6. All low confidence → use zero-shot or mark "unknown"
+        Step 4: Hybrid Decision Logic (Weighted Voting)
+        - Pattern weight: 0.2
+        - Relationship-LLM weight: 0.4
+        - Zero-shot weight: 0.4
+
+        For each entity type, calculate weighted score:
+        score[type] = sum(weight * confidence) for all methods predicting that type
+
+        Choose type with highest weighted score.
 
         Args:
             entity: Entity name
@@ -577,6 +579,11 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         Returns:
             dict: {"type": str, "confidence": float, "method": str}
         """
+        # Method weights
+        PATTERN_WEIGHT = 0.2
+        LLM_WEIGHT = 0.4
+        ZEROSHOT_WEIGHT = 0.4
+
         p_type = pattern_result["type"]
         p_conf = pattern_result["confidence"]
         r_type = relationship_result["type"]
@@ -584,87 +591,62 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         z_type = zeroshot_result["type"]
         z_conf = zeroshot_result["confidence"]
 
-        # Decision 1: High pattern confidence (>0.75)
-        if p_conf > 0.75 and p_type != "other":
-            return {
-                "type": p_type,
-                "confidence": p_conf,
-                "method": "pattern"
-            }
+        # Calculate weighted scores for each type
+        type_scores = {}  # {type: (weighted_score, total_weight, methods)}
 
-        # Decision 2: High relationship confidence (>0.7)
-        if r_conf > 0.7 and r_type != "other":
-            return {
-                "type": r_type,
-                "confidence": r_conf,
-                "method": "relationship_llm"
-            }
+        # Add pattern vote
+        if p_type not in type_scores:
+            type_scores[p_type] = [0.0, 0.0, []]
+        type_scores[p_type][0] += PATTERN_WEIGHT * p_conf
+        type_scores[p_type][1] += PATTERN_WEIGHT
+        type_scores[p_type][2].append("pattern")
 
-        # Decision 3: All 3 agree
-        if p_type == r_type == z_type and p_type != "other":
-            avg_conf = (p_conf + r_conf + z_conf) / 3
-            return {
-                "type": p_type,
-                "confidence": min(0.95, avg_conf + 0.1),  # Boost confidence for agreement
-                "method": "unanimous"
-            }
+        # Add LLM vote
+        if r_type not in type_scores:
+            type_scores[r_type] = [0.0, 0.0, []]
+        type_scores[r_type][0] += LLM_WEIGHT * r_conf
+        type_scores[r_type][1] += LLM_WEIGHT
+        type_scores[r_type][2].append("llm")
 
-        # Decision 4: 2/3 agree (majority vote)
-        votes = [p_type, r_type, z_type]
-        vote_counts = {}
-        for vote in votes:
-            vote_counts[vote] = vote_counts.get(vote, 0) + 1
+        # Add zero-shot vote
+        if z_type not in type_scores:
+            type_scores[z_type] = [0.0, 0.0, []]
+        type_scores[z_type][0] += ZEROSHOT_WEIGHT * z_conf
+        type_scores[z_type][1] += ZEROSHOT_WEIGHT
+        type_scores[z_type][2].append("zeroshot")
 
-        # Find majority (at least 2 votes)
-        for vote_type, count in vote_counts.items():
-            if count >= 2 and vote_type != "other":
-                # Average confidence of methods that voted for this type
-                confidences = []
-                if p_type == vote_type:
-                    confidences.append(p_conf)
-                if r_type == vote_type:
-                    confidences.append(r_conf)
-                if z_type == vote_type:
-                    confidences.append(z_conf)
+        # Find type with highest weighted score (excluding "other" if possible)
+        non_other_types = [(t, s) for t, s in type_scores.items() if t != "other"]
 
-                avg_conf = sum(confidences) / len(confidences)
-                return {
-                    "type": vote_type,
-                    "confidence": avg_conf,
-                    "method": "majority_vote"
-                }
-
-        # Decision 5: Conflict - prefer pattern if confident, else relationship
-        if p_type != "other" and p_conf >= 0.6:
-            return {
-                "type": p_type,
-                "confidence": p_conf,
-                "method": "pattern_fallback"
-            }
-
-        if r_type != "other" and r_conf >= 0.5:
-            return {
-                "type": r_type,
-                "confidence": r_conf,
-                "method": "relationship_fallback"
-            }
-
-        # Decision 6: All methods failed or low confidence - use zero-shot or "other"
-        if z_type != "other" and z_conf >= 0.5:
-            return {
-                "type": z_type,
-                "confidence": z_conf,
-                "method": "zeroshot_fallback"
-            }
-
-        # Last resort: choose the one with highest confidence
-        max_conf = max(p_conf, r_conf, z_conf)
-        if max_conf == p_conf:
-            return {"type": p_type, "confidence": p_conf, "method": "pattern_last_resort"}
-        elif max_conf == r_conf:
-            return {"type": r_type, "confidence": r_conf, "method": "relationship_last_resort"}
+        if non_other_types:
+            # Choose non-"other" type with highest score
+            best_type, (weighted_score, total_weight, methods) = max(
+                non_other_types,
+                key=lambda x: x[1][0]
+            )
         else:
-            return {"type": z_type, "confidence": z_conf, "method": "zeroshot_last_resort"}
+            # All methods predicted "other"
+            best_type, (weighted_score, total_weight, methods) = max(
+                type_scores.items(),
+                key=lambda x: x[1][0]
+            )
+
+        # Calculate final confidence as weighted average
+        final_confidence = weighted_score / total_weight if total_weight > 0 else 0.5
+
+        # Determine method label
+        if len(methods) == 3:
+            method = "weighted_unanimous"
+        elif len(methods) == 2:
+            method = f"weighted_{'_'.join(sorted(methods))}"
+        else:
+            method = f"weighted_{methods[0]}"
+
+        return {
+            "type": best_type,
+            "confidence": final_confidence,
+            "method": method
+        }
 
     def _infer_type_relationship(self, entity: str) -> Dict:
         """Infer entity type using graph relationships"""
@@ -921,7 +903,8 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
                     entity2_id = entity_ids[neigh_idx]
 
                     # Similarity = inner product (for normalized vectors, this is cosine similarity)
-                    similarity = float(dist)
+                    # Clamp to [0, 1] to handle numerical precision issues
+                    similarity = float(np.clip(dist, 0.0, 1.0))
 
                     # Filter by threshold
                     if similarity >= self.config.faiss_similarity_threshold:
@@ -1018,7 +1001,8 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
             entity2 = self.id_to_entity[e2_id]
 
             # Feature 1: SapBERT similarity (already computed)
-            sapbert_score = float(sapbert_sim)
+            # Clamp to [0, 1] to ensure valid range
+            sapbert_score = float(np.clip(sapbert_sim, 0.0, 1.0))
 
             # Feature 2: Lexical similarity (normalized edit distance)
             max_len = max(len(entity1), len(entity2))
