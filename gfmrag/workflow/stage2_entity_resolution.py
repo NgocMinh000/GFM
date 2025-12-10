@@ -435,16 +435,37 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 """
 
         try:
-            # Initialize LLM model (YEScale or OpenAI)
-            from gfmrag.kg_construction.langchain_util import init_langchain_model
-
-            # Cache the model at class level to avoid re-initialization
+            # Initialize LLM model with proper env var validation
             if not hasattr(self, '_llm_cache'):
-                self._llm_cache = init_langchain_model(
-                    llm="openai",  # Will use YEScale if YESCALE_API_BASE_URL is set, else OpenAI
-                    model_name="gpt-4o-mini",
-                    temperature=0.0,
-                )
+                import os
+
+                # Check for YEScale API credentials
+                yescale_url = os.environ.get("YESCALE_API_BASE_URL")
+                yescale_key = os.environ.get("YESCALE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
+                if not yescale_url or not yescale_key:
+                    logger.warning(
+                        "YEScale API not configured (YESCALE_API_BASE_URL or YESCALE_API_KEY missing). "
+                        "Skipping LLM-based relationship inference. "
+                        "Set YESCALE_API_BASE_URL and YESCALE_API_KEY environment variables to enable."
+                    )
+                    # Set flag to skip LLM calls entirely
+                    self._llm_cache = None
+                else:
+                    # Use YEScale API
+                    from gfmrag.kg_construction.yescale_chat_model import YEScaleChatModel
+
+                    self._llm_cache = YEScaleChatModel(
+                        api_url=yescale_url,
+                        api_key=yescale_key,
+                        model="gpt-4o-mini",
+                        temperature=0.0,
+                    )
+                    logger.info(f"✅ Initialized YEScale LLM for relationship inference: {yescale_url}")
+
+            # If LLM not available, return low confidence "other"
+            if self._llm_cache is None:
+                return {"type": "other", "confidence": 0.3}
 
             llm = self._llm_cache
 
