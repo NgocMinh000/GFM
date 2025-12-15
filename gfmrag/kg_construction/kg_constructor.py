@@ -472,18 +472,22 @@ class KGConstructor(BaseKGConstructor):
                             unclean_triples.append(triple)
                             continue
 
-                        clean_triples.append(clean_triple)
-                        phrases.extend(clean_triple)
-
                         head_ent = clean_triple[0]
                         tail_ent = clean_triple[2]
 
+                        # STRICT VALIDATION: Skip triples without NER entities
+                        # Only keep triples where at least one entity is from NER
                         if (
                             head_ent not in ner_entities
                             and tail_ent not in ner_entities
                         ):
                             triples_wo_ner_entity.append(triple)
+                            unclean_triples.append(triple)
+                            continue  # SKIP this triple - don't add to graph
 
+                        # Only add to graph if validation passed
+                        clean_triples.append(clean_triple)
+                        phrases.extend(clean_triple)
                         graph[(head_ent, tail_ent)] = clean_triple[1]
 
                         for triple_entity in [clean_triple[0], clean_triple[2]]:

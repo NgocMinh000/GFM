@@ -182,12 +182,17 @@ one_shot_passage_triples = """{"triples": [
 openie_post_ner_instruction = """Your task is to construct a MEDICAL RDF (Resource Description Framework) graph from the given passages and named entity lists.
 Respond with a JSON list of triples, with each triple representing a MEDICAL relationship in the RDF graph.
 
-CRITICAL: After extracting relationships, you MUST NORMALIZE them to canonical forms to ensure consistency.
+CRITICAL REQUIREMENTS:
+1. You MUST ONLY use entities from the provided named_entities list
+2. Each triple MUST contain at least ONE entity from the named_entities list (preferably BOTH subject and object)
+3. DO NOT create new entities that are not in the named_entities list
+4. After extracting relationships, you MUST NORMALIZE them to canonical forms to ensure consistency
 
 === RELATIONSHIP EXTRACTION & NORMALIZATION PROCESS ===
 
-Step 1: Extract the medical relationship from the text naturally
-Step 2: NORMALIZE it to the most common canonical form following the guidelines below
+Step 1: Identify entities from the named_entities list in the text
+Step 2: Extract relationships ONLY between these identified entities
+Step 3: NORMALIZE the relationship to the most common canonical form following the guidelines below
 
 === CANONICAL MEDICAL RELATIONSHIP FORMS ===
 
