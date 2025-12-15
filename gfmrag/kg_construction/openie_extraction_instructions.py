@@ -124,22 +124,22 @@ ner_prompts = ChatPromptTemplate.from_messages(
 
 # Output mẫu cho OpenIE: Danh sách các bộ ba (triples) - MEDICAL DOMAIN
 # Mỗi triple có dạng [subject, predicate, object]
-# Focus: Chỉ trích xuất relations liên quan đến y tế
+# Focus: Chỉ trích xuất relations liên quan đến y tế, normalized to canonical forms
 one_shot_passage_triples = """{"triples": [
-            ["Metformin", "is", "first-line medication"],
+            ["Metformin", "is_a", "first-line medication"],
             ["Metformin", "treats", "type 2 diabetes"],
             ["Metformin", "decreases", "glucose production"],
-            ["glucose", "produced in", "liver"],
+            ["glucose", "produced_in", "liver"],
             ["Metformin", "improves", "insulin sensitivity"],
-            ["insulin", "acts on", "peripheral tissues"],
+            ["insulin", "acts_on", "peripheral tissues"],
             ["Metformin", "causes", "nausea"],
             ["Metformin", "causes", "diarrhea"],
             ["Metformin", "causes", "abdominal pain"],
-            ["Metformin", "reduces risk of", "cardiovascular disease"],
-            ["Metformin", "prevents progression from", "prediabetes"],
-            ["prediabetes", "progresses to", "type 2 diabetes"],
-            ["Metformin", "contraindicated in", "renal impairment"],
-            ["Metformin", "contraindicated in", "acute kidney injury"]
+            ["Metformin", "prevents", "cardiovascular disease"],
+            ["Metformin", "prevents", "prediabetes"],
+            ["prediabetes", "progresses_to", "type 2 diabetes"],
+            ["Metformin", "contraindicated_in", "renal impairment"],
+            ["Metformin", "contraindicated_in", "acute kidney injury"]
     ]
 }
 """
@@ -148,99 +148,124 @@ one_shot_passage_triples = """{"triples": [
 openie_post_ner_instruction = """Your task is to construct a MEDICAL RDF (Resource Description Framework) graph from the given passages and named entity lists.
 Respond with a JSON list of triples, with each triple representing a MEDICAL relationship in the RDF graph.
 
-IMPORTANT: PRIORITIZE using standardized medical relationship types listed below, but you MAY create additional relationships if needed to accurately capture medical information from the text.
+CRITICAL: After extracting relationships, you MUST NORMALIZE them to canonical forms to ensure consistency.
 
-=== STANDARDIZED MEDICAL RELATIONSHIPS (Use These First) ===
+=== RELATIONSHIP EXTRACTION & NORMALIZATION PROCESS ===
 
-1. DRUG-DISEASE RELATIONSHIPS:
-   • treats
-   • prevents
-   • manages
-   • indicated_for
-   • contraindicated_in
+Step 1: Extract the medical relationship from the text naturally
+Step 2: NORMALIZE it to the most common canonical form following the guidelines below
 
-2. DRUG-SYMPTOM RELATIONSHIPS:
-   • causes (for side effects)
-   • alleviates
-   • reduces
+=== CANONICAL MEDICAL RELATIONSHIP FORMS ===
 
-3. DISEASE-SYMPTOM RELATIONSHIPS:
-   • presents_with
-   • characterized_by
-   • associated_with
+Use these CANONICAL forms (standardized, concise, medical terminology):
 
-4. DISEASE-ANATOMY RELATIONSHIPS:
-   • affects
-   • damages
-   • located_in
+1. THERAPEUTIC RELATIONSHIPS:
+   • treats (NOT "is used to treat", "helps treat", "used for")
+   • prevents (NOT "helps prevent", "can prevent")
+   • manages (NOT "helps manage", "used to manage")
+   • indicated_for (NOT "indicated in", "prescribed for")
+   • contraindicated_in (NOT "should not be used in")
 
-5. DRUG-MECHANISM RELATIONSHIPS:
-   • inhibits
-   • activates
-   • increases
-   • decreases
-   • blocks
+2. CAUSATION RELATIONSHIPS:
+   • causes (NOT "can cause", "may cause", "leads to")
+   • triggers (for acute events)
+   • induces (for physiological changes)
 
-6. DRUG-ANATOMY RELATIONSHIPS:
-   • acts_on
-   • targets
+3. AMELIORATION RELATIONSHIPS:
+   • alleviates (NOT "helps with", "relieves")
+   • reduces (NOT "decreases", "lowers" - use "reduces" for symptoms)
+   • improves (NOT "helps improve")
 
-7. GENE-DISEASE RELATIONSHIPS:
-   • causes (for genetic mutations)
-   • associated_with
-   • risk_factor_for
+4. PRESENTATION RELATIONSHIPS:
+   • presents_with (NOT "shows", "has symptoms of")
+   • characterized_by (NOT "characterized as", "marked by")
+   • associated_with (NOT "linked to", "related to", "connected to")
 
-8. PROCEDURE-DISEASE RELATIONSHIPS:
-   • treats (for medical procedures)
-   • diagnoses
-   • monitors
+5. ANATOMICAL RELATIONSHIPS:
+   • affects (NOT "impacts", "influences")
+   • damages (NOT "harms", "injures")
+   • located_in (NOT "found in", "occurs in")
 
-9. DISEASE-DISEASE RELATIONSHIPS:
-   • progresses_to
-   • complication_of
-   • risk_factor_for
+6. MECHANISM RELATIONSHIPS:
+   • inhibits (NOT "blocks", "suppresses" - use "inhibits" for pharmacology)
+   • activates (NOT "stimulates", "triggers")
+   • increases (for upregulation)
+   • decreases (for downregulation)
+   • binds_to (for molecular binding)
+   • targets (for drug targets)
 
-10. GENERAL MEDICAL RELATIONSHIPS:
-    • is (for definitions/classifications only)
-    • produced_in (for metabolic/physiological processes)
+7. METABOLIC RELATIONSHIPS:
+   • metabolized_by (NOT "metabolized in", "broken down by")
+   • secreted_by (NOT "secreted from", "produced by" - use for hormones/enzymes)
+   • synthesized_in (for biosynthesis)
+   • excreted_by (for elimination)
 
-=== GUIDELINES FOR RELATIONSHIP EXTRACTION ===
+8. CLASSIFICATION RELATIONSHIPS:
+   • is_a (NOT "is", "is type of", "classified as")
+   • subtype_of (for disease subtypes)
 
-1. **PRIORITIZE standardized relationships above** - use them whenever possible
-2. **If no standardized relationship fits**, you may create a NEW relationship that:
-   - Uses concise, medical terminology (e.g., "metabolizes_to", "secreted_by", "regulates")
-   - Uses underscore notation (e.g., "binds_to" not "binds to")
-   - Is specific and descriptive (avoid generic terms like "relates_to", "linked_to")
-   - Captures meaningful medical relationships from the text
-3. **DO NOT create variations** of existing standardized relationships (e.g., "used_to_treat" when "treats" exists)
-4. **Each triple MUST contain** at least one, preferably two, medical entities
-5. **Resolve pronouns** to specific entity names for clarity
-6. **Focus on MEDICAL relationships** - exclude organizational, geographical, or purely temporal relationships
+9. PROGRESSION RELATIONSHIPS:
+   • progresses_to (NOT "develops into", "leads to")
+   • complication_of (NOT "complicates")
+   • risk_factor_for (NOT "increases risk of", "risk for")
 
-=== EXAMPLES ===
+10. DIAGNOSTIC/PROCEDURAL:
+    • diagnoses (NOT "used to diagnose")
+    • monitors (NOT "used to monitor")
+    • detects (for diagnostic tests)
 
-✅ GOOD - Using standardized relationships:
-  ["Metformin", "treats", "type 2 diabetes"]
-  ["Metformin", "decreases", "glucose production"]
-  ["Metformin", "causes", "nausea"]
+11. GENETIC RELATIONSHIPS:
+    • mutation_causes (for genetic mutations → disease)
+    • encodes (gene → protein)
+    • regulates (for gene regulation)
 
-✅ GOOD - Creating new relationships when needed:
-  ["insulin", "secreted_by", "pancreas"]           # No standardized equivalent
-  ["warfarin", "metabolized_by", "liver"]          # Specific metabolic process
-  ["calcium", "required_for", "bone formation"]    # Nutritional relationship
-  ["antibody", "binds_to", "antigen"]              # Immunological interaction
+=== NORMALIZATION EXAMPLES ===
 
-❌ BAD - Unnecessary variations:
-  ["Metformin", "is_used_to_treat", "diabetes"]    # Use "treats"
-  ["Metformin", "helps_with", "diabetes"]          # Use "treats"
-  ["aspirin", "can_cause", "bleeding"]             # Use "causes"
+Text says → Normalize to:
+• "is a medication" → "is_a"
+• "Metformin is used to treat diabetes" → "treats"
+• "can cause nausea" → "causes"
+• "helps reduce pain" → "reduces"
+• "is broken down by the liver" → "metabolized_by"
+• "secreted from the pancreas" → "secreted_by"
+• "blocks the enzyme" → "inhibits"
+• "is linked to heart disease" → "associated_with"
+• "leads to kidney failure" → "progresses_to"
+• "shows symptoms of fever" → "presents_with"
 
-❌ BAD - Generic/vague relationships:
-  ["drug", "relates_to", "disease"]                # Too generic
-  ["A", "linked_to", "B"]                          # Not descriptive
+=== IMPORTANT RULES ===
+
+1. **ALWAYS normalize** to the canonical form - don't keep verbose forms
+2. **Use underscore notation** (e.g., "is_a", "binds_to", "secreted_by")
+3. **Avoid generic terms**: Never use "relates_to", "linked_to", "connected_to"
+4. **Keep it concise**: "treats" not "is_used_to_treat"
+5. **Be consistent**: Same meaning → same relationship name
+6. **Medical terminology**: Use proper medical verbs when available
+
+=== EXAMPLES OF CORRECT NORMALIZATION ===
+
+✅ CORRECT:
+  ["Metformin", "is_a", "medication"]                    # NOT "is"
+  ["Metformin", "treats", "type 2 diabetes"]             # NOT "is used to treat"
+  ["Metformin", "causes", "nausea"]                      # NOT "can cause"
+  ["insulin", "secreted_by", "pancreas"]                 # NOT "secreted from"
+  ["warfarin", "metabolized_by", "liver"]                # NOT "broken down by"
+  ["aspirin", "inhibits", "COX enzyme"]                  # NOT "blocks"
+  ["diabetes", "associated_with", "obesity"]             # NOT "linked to"
+
+❌ INCORRECT - Not normalized:
+  ["Metformin", "is", "medication"]                      # Should be "is_a"
+  ["Metformin", "is_used_to_treat", "diabetes"]         # Should be "treats"
+  ["Metformin", "can_cause", "nausea"]                  # Should be "causes"
+  ["insulin", "secreted_from", "pancreas"]              # Should be "secreted_by"
+  ["diabetes", "linked_to", "obesity"]                  # Should be "associated_with"
 
 === SUMMARY ===
-Use standardized relationships when they fit. Create new concise, specific relationships only when standardized ones don't capture the medical meaning accurately.
+
+1. Extract relationships from text naturally
+2. NORMALIZE to canonical forms using the guidelines above
+3. Keep relationship vocabulary controlled but not overly restrictive
+4. Expected result: ~40-60 unique relationship types (not 193+)
 
 """
 # Hướng dẫn: 
