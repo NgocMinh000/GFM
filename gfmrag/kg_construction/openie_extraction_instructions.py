@@ -148,9 +148,9 @@ one_shot_passage_triples = """{"triples": [
 openie_post_ner_instruction = """Your task is to construct a MEDICAL RDF (Resource Description Framework) graph from the given passages and named entity lists.
 Respond with a JSON list of triples, with each triple representing a MEDICAL relationship in the RDF graph.
 
-CRITICAL: You MUST use ONLY the standardized medical relationship types listed below. Do NOT create custom relationship names.
+IMPORTANT: PRIORITIZE using standardized medical relationship types listed below, but you MAY create additional relationships if needed to accurately capture medical information from the text.
 
-=== STANDARDIZED MEDICAL RELATIONSHIPS ===
+=== STANDARDIZED MEDICAL RELATIONSHIPS (Use These First) ===
 
 1. DRUG-DISEASE RELATIONSHIPS:
    • treats
@@ -204,28 +204,43 @@ CRITICAL: You MUST use ONLY the standardized medical relationship types listed b
     • is (for definitions/classifications only)
     • produced_in (for metabolic/physiological processes)
 
-=== IMPORTANT RULES ===
+=== GUIDELINES FOR RELATIONSHIP EXTRACTION ===
 
-1. MUST use ONLY the relationships listed above
-2. DO NOT create variations (e.g., "used to treat" → use "treats")
-3. DO NOT use generic relationships (e.g., "related to", "linked to")
-4. Each triple MUST contain at least one, preferably two, medical entities
-5. Clearly resolve pronouns to specific entity names
-6. Focus ONLY on medical/healthcare relationships
-7. EXCLUDE non-medical relationships (organizational, geographical, temporal)
+1. **PRIORITIZE standardized relationships above** - use them whenever possible
+2. **If no standardized relationship fits**, you may create a NEW relationship that:
+   - Uses concise, medical terminology (e.g., "metabolizes_to", "secreted_by", "regulates")
+   - Uses underscore notation (e.g., "binds_to" not "binds to")
+   - Is specific and descriptive (avoid generic terms like "relates_to", "linked_to")
+   - Captures meaningful medical relationships from the text
+3. **DO NOT create variations** of existing standardized relationships (e.g., "used_to_treat" when "treats" exists)
+4. **Each triple MUST contain** at least one, preferably two, medical entities
+5. **Resolve pronouns** to specific entity names for clarity
+6. **Focus on MEDICAL relationships** - exclude organizational, geographical, or purely temporal relationships
 
-=== EXAMPLES OF CORRECT vs INCORRECT ===
+=== EXAMPLES ===
 
-✅ CORRECT:
+✅ GOOD - Using standardized relationships:
   ["Metformin", "treats", "type 2 diabetes"]
   ["Metformin", "decreases", "glucose production"]
   ["Metformin", "causes", "nausea"]
 
-❌ INCORRECT:
-  ["Metformin", "is used to treat", "type 2 diabetes"]  → Use "treats"
-  ["Metformin", "helps with", "diabetes"]              → Use "treats"
-  ["Metformin", "is a drug for", "diabetes"]           → Use "treats"
-  ["Metformin", "can cause", "nausea"]                 → Use "causes"
+✅ GOOD - Creating new relationships when needed:
+  ["insulin", "secreted_by", "pancreas"]           # No standardized equivalent
+  ["warfarin", "metabolized_by", "liver"]          # Specific metabolic process
+  ["calcium", "required_for", "bone formation"]    # Nutritional relationship
+  ["antibody", "binds_to", "antigen"]              # Immunological interaction
+
+❌ BAD - Unnecessary variations:
+  ["Metformin", "is_used_to_treat", "diabetes"]    # Use "treats"
+  ["Metformin", "helps_with", "diabetes"]          # Use "treats"
+  ["aspirin", "can_cause", "bleeding"]             # Use "causes"
+
+❌ BAD - Generic/vague relationships:
+  ["drug", "relates_to", "disease"]                # Too generic
+  ["A", "linked_to", "B"]                          # Not descriptive
+
+=== SUMMARY ===
+Use standardized relationships when they fit. Create new concise, specific relationships only when standardized ones don't capture the medical meaning accurately.
 
 """
 # Hướng dẫn: 
