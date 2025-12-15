@@ -148,23 +148,84 @@ one_shot_passage_triples = """{"triples": [
 openie_post_ner_instruction = """Your task is to construct a MEDICAL RDF (Resource Description Framework) graph from the given passages and named entity lists.
 Respond with a JSON list of triples, with each triple representing a MEDICAL relationship in the RDF graph.
 
-IMPORTANT: Focus on MEDICAL/HEALTHCARE relationships only. Extract relationships such as:
-- Drug-Disease: treats, prevents, cures, manages, prescribed for
-- Drug-Symptom: causes (side effects), relieves, alleviates
-- Disease-Symptom: characterized by, presents with, associated with
-- Disease-Anatomical: affects, damages, located in
-- Drug-Mechanism: inhibits, blocks, activates, decreases, increases
-- Gene-Disease: mutation causes, associated with, risk factor for
-- Procedure-Disease: used to treat, diagnoses, monitors
+CRITICAL: You MUST use ONLY the standardized medical relationship types listed below. Do NOT create custom relationship names.
 
-DO NOT extract:
-- General non-medical relationships (e.g., organizational, geographical)
-- Temporal relationships unless medically relevant
+=== STANDARDIZED MEDICAL RELATIONSHIPS ===
 
-Pay attention to the following requirements:
-- Each triple should contain at least one, but preferably two, of the medical named entities in the list for each passage.
-- Clearly resolve pronouns to their specific names to maintain clarity.
-- Use medical domain relationships whenever possible (e.g., "treats", "causes", "associated with" instead of generic "is related to").
+1. DRUG-DISEASE RELATIONSHIPS:
+   • treats
+   • prevents
+   • manages
+   • indicated_for
+   • contraindicated_in
+
+2. DRUG-SYMPTOM RELATIONSHIPS:
+   • causes (for side effects)
+   • alleviates
+   • reduces
+
+3. DISEASE-SYMPTOM RELATIONSHIPS:
+   • presents_with
+   • characterized_by
+   • associated_with
+
+4. DISEASE-ANATOMY RELATIONSHIPS:
+   • affects
+   • damages
+   • located_in
+
+5. DRUG-MECHANISM RELATIONSHIPS:
+   • inhibits
+   • activates
+   • increases
+   • decreases
+   • blocks
+
+6. DRUG-ANATOMY RELATIONSHIPS:
+   • acts_on
+   • targets
+
+7. GENE-DISEASE RELATIONSHIPS:
+   • causes (for genetic mutations)
+   • associated_with
+   • risk_factor_for
+
+8. PROCEDURE-DISEASE RELATIONSHIPS:
+   • treats (for medical procedures)
+   • diagnoses
+   • monitors
+
+9. DISEASE-DISEASE RELATIONSHIPS:
+   • progresses_to
+   • complication_of
+   • risk_factor_for
+
+10. GENERAL MEDICAL RELATIONSHIPS:
+    • is (for definitions/classifications only)
+    • produced_in (for metabolic/physiological processes)
+
+=== IMPORTANT RULES ===
+
+1. MUST use ONLY the relationships listed above
+2. DO NOT create variations (e.g., "used to treat" → use "treats")
+3. DO NOT use generic relationships (e.g., "related to", "linked to")
+4. Each triple MUST contain at least one, preferably two, medical entities
+5. Clearly resolve pronouns to specific entity names
+6. Focus ONLY on medical/healthcare relationships
+7. EXCLUDE non-medical relationships (organizational, geographical, temporal)
+
+=== EXAMPLES OF CORRECT vs INCORRECT ===
+
+✅ CORRECT:
+  ["Metformin", "treats", "type 2 diabetes"]
+  ["Metformin", "decreases", "glucose production"]
+  ["Metformin", "causes", "nausea"]
+
+❌ INCORRECT:
+  ["Metformin", "is used to treat", "type 2 diabetes"]  → Use "treats"
+  ["Metformin", "helps with", "diabetes"]              → Use "treats"
+  ["Metformin", "is a drug for", "diabetes"]           → Use "treats"
+  ["Metformin", "can cause", "nausea"]                 → Use "causes"
 
 """
 # Hướng dẫn: 
