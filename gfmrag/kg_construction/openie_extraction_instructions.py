@@ -71,20 +71,114 @@ one_shot_passage_entities = """{"named_entities":
 
 ner_instruction = """Your task is to extract MEDICAL named entities from the given paragraph.
 
-IMPORTANT: Only extract entities relevant to the MEDICAL/HEALTHCARE domain. Focus on:
-- Drugs/Medications (e.g., Metformin, Aspirin, antibiotics)
-- Diseases/Conditions (e.g., diabetes, hypertension, cancer)
-- Symptoms/Signs (e.g., fever, pain, nausea, fatigue)
-- Medical Procedures/Treatments (e.g., surgery, chemotherapy, dialysis)
-- Genes/Proteins/Hormones (e.g., insulin, TP53, hemoglobin)
-- Anatomical Structures (e.g., liver, heart, blood vessels, cells)
-- Medical Devices/Equipment (e.g., stethoscope, MRI scanner)
-- Biological Molecules (e.g., glucose, cholesterol, antibodies)
+CRITICAL: A MEDICAL ENTITY is a substantive noun or noun phrase representing a concrete medical concept. Extract ONLY proper medical entities, NOT properties, attributes, values, or descriptive phrases.
 
-DO NOT extract:
-- General organizations, locations, or dates (unless directly medical)
-- People's names (unless they are patients/doctors in medical context)
-- Non-medical products or technologies
+=== WHAT TO EXTRACT (Medical Entities) ===
+
+✅ Extract these categories ONLY:
+
+1. **Drugs/Medications** - Proper chemical/brand names
+   • Examples: Metformin, Aspirin, beclomethasone dipropionate, insulin
+   • Include: Active ingredients, drug metabolites (if named properly)
+
+2. **Diseases/Conditions** - Medical condition names
+   • Examples: type 2 diabetes, hypertension, acute kidney injury, cancer
+
+3. **Symptoms/Signs** - Observable medical symptoms
+   • Examples: nausea, fever, pain, diarrhea, fatigue
+
+4. **Anatomical Structures** - Body parts, organs, tissues
+   • Examples: liver, heart, blood vessels, pancreas, peripheral tissues
+
+5. **Biological Substances** - Natural compounds, molecules, proteins
+   • Examples: glucose, insulin, hemoglobin, cholesterol, antibodies
+   • Note: Must be SUBSTANCE names, not properties
+
+6. **Medical Procedures** - Named treatments or diagnostic procedures
+   • Examples: chemotherapy, dialysis, MRI scan, biopsy
+
+7. **Genes/Proteins** - Specific gene or protein names
+   • Examples: TP53, BRCA1, cytochrome c oxidase
+   • Note: Proper names only, not "protein binding"
+
+=== WHAT NOT TO EXTRACT (Critical!) ===
+
+❌ DO NOT extract these:
+
+1. **Pharmacokinetic Properties**
+   ❌ half-life, clearance, bioavailability, absorption
+   ❌ "protein binding" (this is a property, not an entity)
+   ❌ "volume of distribution"
+
+2. **Routes/Methods of Administration**
+   ❌ oral, intravenous, subcutaneous, topical
+   ❌ "oral administration", "intravenous route"
+   ❌ Note: Alone, these are NOT medical entities
+
+3. **Measurements/Values/Numbers**
+   ❌ "94 96", "0.5 hours", "8.8 hours"
+   ❌ Percentages, doses, durations (alone)
+   ❌ "100mg", "twice daily"
+
+4. **Generic Descriptors**
+   ❌ "high potency", "low dose", "long-acting"
+   ❌ Adjectives without the noun they modify
+
+5. **Compound Phrases Mixing Entity + Property**
+   ❌ "half life oral administration" → Extract nothing (neither are entities)
+   ❌ "protein binding 94%" → Extract nothing
+
+=== ENTITY NAME NORMALIZATION ===
+
+When extracting, use CANONICAL medical names:
+
+✅ CORRECT normalization:
+  • "beclomethasone dipropionate" (proper drug name)
+  • "beclomethasone 17-monopropionate" (proper metabolite name with hyphen)
+  • "type 2 diabetes" (standard disease name)
+
+❌ INCORRECT - do not extract:
+  • "17 monopropionate 17 bmp" (malformed, unclear)
+  • Names with random spaces, duplicate numbers
+  • Partial/incomplete names
+
+=== QUALITY CONTROL CRITERIA ===
+
+Before extracting an entity, verify:
+1. ✅ Is it a NOUN or NOUN PHRASE (not adjective, adverb, or verb)?
+2. ✅ Does it represent a CONCRETE medical concept (not a property)?
+3. ✅ Can it stand alone with clear medical meaning?
+4. ✅ Is the name properly formatted (canonical medical terminology)?
+
+If any answer is NO → DO NOT extract it.
+
+=== EXAMPLES OF CORRECT EXTRACTION ===
+
+Text: "Beclomethasone dipropionate has a protein binding of 94% and a half-life of 8 hours when administered intravenously."
+
+✅ EXTRACT:
+  ["beclomethasone dipropionate"]
+
+❌ DO NOT EXTRACT:
+  "protein binding" → property
+  "94%" → value
+  "half-life" → property
+  "8 hours" → value
+  "intravenously" → route (alone)
+
+Text: "Metformin treats type 2 diabetes by decreasing glucose production in the liver."
+
+✅ EXTRACT:
+  ["Metformin", "type 2 diabetes", "glucose", "liver"]
+
+❌ DO NOT EXTRACT:
+  "glucose production" → "glucose" is entity, but "production" makes it a process
+
+=== SUMMARY ===
+
+Extract ONLY substantive medical entities (drugs, diseases, anatomy, substances).
+DO NOT extract properties, values, routes, measurements, or descriptive phrases.
+Use canonical medical names, properly formatted.
 
 Respond with a JSON list of medical entities only.
 Strictly follow the required JSON format.
