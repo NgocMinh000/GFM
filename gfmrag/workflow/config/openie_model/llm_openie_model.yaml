@@ -1,5 +1,5 @@
 _target_: gfmrag.kg_construction.openie_model.LLMOPENIEModel
 llm_api: openai
-model_name: gpt-4o
+model_name: gpt-4.1-mini-2025-04-14
 max_ner_tokens: 300
 max_triples_tokens: 4096
