@@ -69,56 +69,69 @@ one_shot_passage_entities = """{"named_entities":
 # NER PROMPTS - Hướng dẫn cho Named Entity Recognition
 # ============================================================================
 
-ner_instruction = """Your task is to extract named entities from the given paragraph.
+ner_instruction = """Your task is to extract MEDICAL and BIOLOGICAL named entities from the given paragraph.
 
-Extract entities that are medically relevant OR scientifically/biologically related. Be inclusive but focus on substantive nouns.
+Focus on entities directly related to healthcare, medicine, and biological sciences. Be precise and prioritize medical relevance.
 
 === CATEGORIES TO EXTRACT ===
 
-Extract nouns/noun phrases from these categories:
+Extract specific medical/biological entities from these categories:
 
-1. **Drugs & Chemicals**: Medications, compounds, elements, substances
-   • Examples: Metformin, Prednisone, Oxygen, beclomethasone dipropionate, cortisol, glucose
+1. **Drugs & Chemicals**: Specific medications, compounds, therapeutic substances
+   • Include: Metformin, Prednisone, Oxygen, beclomethasone dipropionate, cortisol, glucose
+   • Exclude: Generic terms like "medicine", "drug", "treatment"
 
-2. **Diseases & Conditions**: Medical conditions, syndromes, disorders
-   • Examples: diabetes, hypertension, ichthyosis, aldosteronism, seizures
+2. **Diseases & Conditions**: Specific medical conditions, syndromes, disorders
+   • Include: type 2 diabetes, hypertension, ichthyosis, aldosteronism, seizures
+   • Exclude: Generic terms like "disease", "condition", "illness"
 
-3. **Symptoms & Signs**: Observable manifestations
-   • Examples: fever, pain, inflammation, alopecia, ectropion
+3. **Symptoms & Signs**: Specific clinical manifestations
+   • Include: fever, nausea, inflammation, alopecia, ectropion, hypoxia
+   • Exclude: Generic terms like "symptom", "sign"
 
-4. **Anatomy**: Body parts, organs, tissues, cells
-   • Examples: liver, adrenal cortex, skin, blood vessels, cornea
+4. **Anatomy**: Specific body structures, organs, tissues, cells
+   • Include: liver, adrenal cortex, pancreas, blood vessels, cornea
+   • Exclude: Generic terms like "body", "organ", "tissue"
 
-5. **Biological Entities**: Proteins, hormones, genes, enzymes
-   • Examples: insulin, hemoglobin, TP53, cytochrome c oxidase, glucocorticoid
+5. **Biological Entities**: Specific proteins, hormones, genes, enzymes
+   • Include: insulin, hemoglobin, TP53, cytochrome c oxidase, glucocorticoid
+   • Exclude: Generic terms like "protein", "hormone", "enzyme"
 
-6. **Medical Procedures**: Treatments, therapies, diagnostic methods
-   • Examples: chemotherapy, dialysis, therapy, transplant
+6. **Medical Procedures**: Specific treatments or diagnostic procedures
+   • Include: chemotherapy, dialysis, MRI scan, transplantation
+   • Exclude: Generic terms like "therapy", "treatment", "procedure"
 
-=== WHAT TO AVOID ===
+=== WHAT NOT TO EXTRACT ===
 
 Do NOT extract:
-- Pure numbers or measurements alone: "94%", "8 hours", "100mg"
-- Generic properties alone: "half-life", "protein binding", "clearance"
-- Routes alone: "oral", "intravenous" (unless part of entity name)
-- Adjectives without nouns: "high", "severe", "chronic"
+- Generic/common nouns: "patients", "people", "doctors", "medicine", "therapy"
+- Pure numbers/measurements: "94%", "8 hours", "100mg"
+- Properties: "half-life", "protein binding", "clearance", "absorption"
+- Routes: "oral", "intravenous" (alone)
+- Adjectives: "high", "severe", "chronic" (alone)
+- Time/dates: "2025", "Monday", "morning"
 
 === GUIDELINES ===
 
-✓ Extract the entity name as it appears in text (keep proper formatting)
-✓ Include chemical names even if complex: "beclomethasone 17-monopropionate"
-✓ Include disease syndrome names even if long
-✓ Be generous - if it's a concrete noun with medical/biological relevance, extract it
-✓ When in doubt, EXTRACT rather than skip
+✓ Only extract if the entity has clear MEDICAL/BIOLOGICAL specificity
+✓ Prefer specific entity names over generic categories
+✓ Keep proper formatting for chemical/medical names
+✓ Include long disease syndrome names if they are specific
+✓ When in doubt, ask: "Is this a SPECIFIC medical/biological entity?"
 
 === EXAMPLES ===
 
 Text: "Hydrocortisone is a glucocorticoid produced by the adrenal cortex with a half-life of 8 hours."
-Extract: ["Hydrocortisone", "glucocorticoid", "adrenal cortex"]
-Skip: "half-life", "8 hours"
+✓ Extract: ["Hydrocortisone", "glucocorticoid", "adrenal cortex"]
+✗ Skip: "half-life", "8 hours"
 
 Text: "Oxygen therapy treats hypoxia in patients with respiratory failure."
-Extract: ["Oxygen", "therapy", "hypoxia", "patients", "respiratory failure"]
+✓ Extract: ["Oxygen", "hypoxia", "respiratory failure"]
+✗ Skip: "therapy", "patients" (too generic)
+
+Text: "The patient received treatment for severe pain and inflammation."
+✓ Extract: ["pain", "inflammation"]
+✗ Skip: "patient", "treatment", "severe" (generic/adjective)
 
 Respond with a JSON list of named entities.
 Format: {"named_entities": ["entity1", "entity2", ...]}
