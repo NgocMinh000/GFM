@@ -61,6 +61,11 @@ class EntityResolutionConfig:
     embedding_batch_size: int = 256
     embedding_device: str = "cuda"  # cuda/cpu
 
+    # Stage 1b: ColBERT Indexing
+    colbert_model: str = "colbert-ir/colbertv2.0"
+    colbert_root: str = "tmp/colbert_index"
+    colbert_topk: int = 10  # Top-k for similarity lookup
+
     # Stage 2: FAISS Blocking
     faiss_k_neighbors: int = 50  # Candidates per entity
     faiss_similarity_threshold: float = 0.80
@@ -68,11 +73,10 @@ class EntityResolutionConfig:
 
     # Stage 3: Multi-Feature Scoring
     feature_weights: Dict[str, float] = field(default_factory=lambda: {
-        "sapbert": 0.50,      # SapBERT similarity
-        "lexical": 0.25,      # String similarity
-        "type_consistency": 0.15,  # Same type check
-        "graph": 0.10,        # Shared neighbors
-        "umls": 0.0,          # UMLS alignment (disabled)
+        "sapbert": 0.50,      # SapBERT similarity (medical domain embeddings)
+        "lexical": 0.15,      # String similarity (Levenshtein edit distance)
+        "colbert": 0.25,      # ColBERT late interaction similarity
+        "graph": 0.10,        # Shared neighbors (Jaccard similarity)
     })
 
     # Stage 4: Adaptive Thresholding
@@ -116,6 +120,7 @@ class EntityResolutionPipeline:
             "stage0_types": self.output_dir / "stage0_entity_types.json",
             "stage1_embeddings": self.output_dir / "stage1_embeddings.npy",
             "stage1_entity_ids": self.output_dir / "stage1_entity_ids.json",
+            "stage1b_colbert_indexed": self.output_dir / "stage1b_colbert_indexed.json",
             "stage2_candidates": self.output_dir / "stage2_candidate_pairs.jsonl",
             "stage3_scores": self.output_dir / "stage3_scored_pairs.jsonl",
             "stage4_equivalents": self.output_dir / "stage4_equivalent_pairs.jsonl",
@@ -123,6 +128,9 @@ class EntityResolutionPipeline:
             "stage5_canonical": self.output_dir / "stage5_canonical_names.json",
             "kg_clean": self.output_dir / "kg_clean.txt",
         }
+
+        # ColBERT model (lazy initialization)
+        self.colbert_model = None
 
         # Data storage
         self.entities: List[str] = []
@@ -203,6 +211,9 @@ class EntityResolutionPipeline:
 
         # Stage 1: SapBERT Embedding
         embeddings = self.stage1_sapbert_embedding()
+
+        # Stage 1b: ColBERT Indexing
+        self.stage1b_colbert_indexing()
 
         # Stage 2: FAISS Blocking
         candidate_pairs = self.stage2_faiss_blocking(embeddings, entity_types)
@@ -894,6 +905,83 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         logger.info(f"  Std norm: {np.std(np.linalg.norm(embeddings, axis=1)):.3f}")
 
     # ========================================================================
+    # STAGE 1B: COLBERT INDEXING
+    # ========================================================================
+
+    def stage1b_colbert_indexing(self) -> None:
+        """
+        Index all entities using ColBERT for late interaction similarity.
+
+        ColBERT provides token-level embeddings and MaxSim operation for
+        better handling of multi-word entities and semantic matching.
+
+        This stage creates a ColBERT index that will be used in Stage 3
+        to compute similarity scores between entity pairs.
+        """
+        logger.info("\n" + "="*80)
+        logger.info("STAGE 1B: COLBERT INDEXING")
+        logger.info("="*80)
+
+        indexed_flag_path = self.stage_paths["stage1b_colbert_indexed"]
+
+        # Check cache
+        if not self.config.force and indexed_flag_path.exists():
+            logger.info(f"ColBERT index already exists, loading...")
+            with open(indexed_flag_path, 'r') as f:
+                index_info = json.load(f)
+            logger.info(f"✅ ColBERT index loaded: {index_info['num_entities']} entities")
+
+            # Initialize ColBERT model and load existing index
+            from gfmrag.kg_construction.entity_linking_model import ColbertELModel
+            self.colbert_model = ColbertELModel(
+                model_name_or_path=self.config.colbert_model,
+                root=self.config.colbert_root,
+                force=False,
+            )
+            # The index will be auto-loaded when we call __call__
+            self.colbert_model.index(self.entities)
+            return
+
+        logger.info(f"Model: {self.config.colbert_model}")
+        logger.info(f"Index root: {self.config.colbert_root}")
+        logger.info(f"Processing {len(self.entities)} entities...")
+
+        # Initialize ColBERT model
+        from gfmrag.kg_construction.entity_linking_model import ColbertELModel
+
+        self.colbert_model = ColbertELModel(
+            model_name_or_path=self.config.colbert_model,
+            root=self.config.colbert_root,
+            force=self.config.force,
+        )
+
+        # Index all entities
+        logger.info("Indexing entities with ColBERT...")
+        self.colbert_model.index(self.entities)
+
+        logger.info(f"✅ Indexed {len(self.entities)} entities")
+
+        # Save index info
+        if self.config.save_intermediate:
+            with open(indexed_flag_path, 'w') as f:
+                json.dump({
+                    "num_entities": len(self.entities),
+                    "model": self.config.colbert_model,
+                    "index_root": self.config.colbert_root,
+                }, f, indent=2)
+            logger.info(f"✅ Saved index info to: {indexed_flag_path}")
+
+        # Evaluation
+        self.evaluate_stage1b()
+
+    def evaluate_stage1b(self) -> None:
+        """Evaluate ColBERT indexing"""
+        logger.info("\n📊 Stage 1B Evaluation:")
+        logger.info(f"  Indexed entities: {len(self.entities)}")
+        logger.info(f"  Model: {self.config.colbert_model}")
+        logger.info(f"  Index location: {self.config.colbert_root}")
+
+    # ========================================================================
     # STAGE 2: FAISS BLOCKING
     # ========================================================================
 
@@ -1202,9 +1290,61 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
     # STAGE 3: MULTI-FEATURE SCORING
     # ========================================================================
 
+    def _compute_colbert_similarity(self, entity1: str, entity2: str) -> float:
+        """
+        Compute ColBERT similarity between two entities.
+
+        Uses the indexed ColBERT model to perform late interaction similarity.
+        Query entity1 and check similarity with entity2 in the results.
+
+        Args:
+            entity1: First entity name
+            entity2: Second entity name
+
+        Returns:
+            float: ColBERT similarity score [0.0, 1.0]
+        """
+        if self.colbert_model is None:
+            logger.warning("ColBERT model not initialized, returning 0.0 similarity")
+            return 0.0
+
+        try:
+            # Query entity1 against the index
+            results = self.colbert_model([entity1], topk=self.config.colbert_topk)
+
+            # Check if entity2 is in the results
+            if entity1 not in results:
+                return 0.0
+
+            candidates = results[entity1]
+
+            # Find entity2 in the candidates
+            for candidate in candidates:
+                # Use processing_phrases for consistent comparison
+                from gfmrag.kg_construction.utils import processing_phrases
+                candidate_entity = processing_phrases(candidate["entity"])
+                target_entity = processing_phrases(entity2)
+
+                if candidate_entity == target_entity:
+                    # Return normalized score
+                    return float(candidate["norm_score"])
+
+            # If entity2 not found in top-k results, return 0.0
+            return 0.0
+
+        except Exception as e:
+            logger.warning(f"ColBERT similarity computation failed for '{entity1}' and '{entity2}': {e}")
+            return 0.0
+
     def stage3_multifeature_scoring(self, candidate_pairs: List, embeddings: np.ndarray, entity_types: Dict) -> List[Dict]:
         """
-        Calculate comprehensive similarity scores using 5 features.
+        Calculate comprehensive similarity scores using 4 features.
+
+        Features:
+        1. SapBERT similarity (0.50) - Medical domain embeddings
+        2. Lexical similarity (0.15) - Levenshtein edit distance
+        3. ColBERT similarity (0.25) - Late interaction token-level matching
+        4. Graph similarity (0.10) - Shared neighbors (Jaccard)
 
         Args:
             candidate_pairs: List of (entity1_id, entity2_id, sapbert_sim)
@@ -1259,14 +1399,15 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
             if max_len == 0:
                 lexical_score = 1.0
             else:
-                # Simple character-level edit distance
+                # Levenshtein edit distance
                 edit_dist = self._levenshtein_distance(entity1.lower(), entity2.lower())
                 lexical_score = 1.0 - (edit_dist / max_len)
 
-            # Feature 3: Type consistency
-            type1 = entity_types[entity1]["type"]
-            type2 = entity_types[entity2]["type"]
-            type_consistency_score = 1.0 if type1 == type2 else 0.0
+            # Feature 3: ColBERT similarity (late interaction)
+            # Compute bidirectional similarity and take average
+            colbert_score_1to2 = self._compute_colbert_similarity(entity1, entity2)
+            colbert_score_2to1 = self._compute_colbert_similarity(entity2, entity1)
+            colbert_score = (colbert_score_1to2 + colbert_score_2to1) / 2.0
 
             # Feature 4: Graph similarity (Jaccard similarity of neighbors)
             neighbors1 = entity_neighbors.get(entity1, set())
@@ -1278,17 +1419,13 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
             else:
                 graph_score = 0.0
 
-            # Feature 5: UMLS alignment (placeholder - disabled)
-            umls_score = 0.0
-
             # Weighted combination
             weights = self.config.feature_weights
             final_score = (
                 weights["sapbert"] * sapbert_score +
                 weights["lexical"] * lexical_score +
-                weights["type_consistency"] * type_consistency_score +
-                weights["graph"] * graph_score +
-                weights["umls"] * umls_score
+                weights["colbert"] * colbert_score +
+                weights["graph"] * graph_score
             )
 
             scored_pairs.append({
@@ -1298,9 +1435,8 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
                 "entity2_name": entity2,
                 "sapbert": sapbert_score,
                 "lexical": lexical_score,
-                "type_consistency": type_consistency_score,
+                "colbert": colbert_score,
                 "graph": graph_score,
-                "umls": umls_score,
                 "final_score": final_score
             })
 
@@ -1585,6 +1721,9 @@ def main(cfg: DictConfig) -> None:
         sapbert_model=cfg.sapbert.model,
         embedding_batch_size=cfg.sapbert.batch_size,
         embedding_device=cfg.sapbert.device,
+        colbert_model=cfg.colbert.model,
+        colbert_root=cfg.colbert.root,
+        colbert_topk=cfg.colbert.topk,
         faiss_k_neighbors=cfg.faiss.k_neighbors,
         faiss_similarity_threshold=cfg.faiss.similarity_threshold,
         feature_weights=dict(cfg.scoring.feature_weights),
