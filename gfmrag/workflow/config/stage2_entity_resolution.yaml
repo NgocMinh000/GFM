@@ -16,6 +16,12 @@ sapbert:
   batch_size: 256
   device: cuda  # cuda/cpu
 
+# Stage 1b: ColBERT Indexing (for similarity computation)
+colbert:
+  model: colbert-ir/colbertv2.0
+  root: tmp/colbert_index
+  topk: 10  # Top-k candidates for similarity lookup
+
 # Stage 2: FAISS Blocking
 faiss:
   k_neighbors: 150  # Candidates per entity
@@ -25,11 +31,10 @@ faiss:
 # Stage 3: Multi-Feature Scoring
 scoring:
   feature_weights:
-    sapbert: 0.50      # SapBERT similarity
-    lexical: 0.25      # String similarity (edit distance, Jaccard)
-    type_consistency: 0.15  # Same type check
-    graph: 0.10        # Shared neighbors
-    umls: 0.0          # UMLS alignment (disabled)
+    sapbert: 0.50      # SapBERT similarity (medical domain embeddings)
+    lexical: 0.15      # String similarity (Levenshtein edit distance)
+    colbert: 0.25      # ColBERT late interaction similarity
+    graph: 0.10        # Shared neighbors (Jaccard similarity)
 
 # Stage 4: Adaptive Thresholding
 thresholding:
