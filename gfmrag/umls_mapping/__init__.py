@@ -22,6 +22,16 @@ from .cluster_aggregator import ClusterAggregator
 from .hard_negative_filter import HardNegativeFilter
 from .cross_encoder_reranker import CrossEncoderReranker
 from .confidence_propagator import ConfidencePropagator
+from .metrics import (
+    MetricsTracker,
+    Stage0Metrics,
+    Stage1Metrics,
+    Stage2Metrics,
+    Stage3Metrics,
+    Stage4Metrics,
+    Stage5Metrics,
+    Stage6Metrics,
+)
 
 __all__ = [
     "UMLSMappingConfig",
@@ -32,6 +42,14 @@ __all__ = [
     "HardNegativeFilter",
     "CrossEncoderReranker",
     "ConfidencePropagator",
+    "MetricsTracker",
+    "Stage0Metrics",
+    "Stage1Metrics",
+    "Stage2Metrics",
+    "Stage3Metrics",
+    "Stage4Metrics",
+    "Stage5Metrics",
+    "Stage6Metrics",
 ]
 
 __version__ = "1.0.0"

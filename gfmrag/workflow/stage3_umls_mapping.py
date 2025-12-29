@@ -21,6 +21,14 @@ from gfmrag.umls_mapping import (
     HardNegativeFilter,
     CrossEncoderReranker,
     ConfidencePropagator,
+    MetricsTracker,
+    Stage0Metrics,
+    Stage1Metrics,
+    Stage2Metrics,
+    Stage3Metrics,
+    Stage4Metrics,
+    Stage5Metrics,
+    Stage6Metrics,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +53,9 @@ class Stage3UMLSMapping:
         self.output_dir = Path(config.output_root)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Initialize metrics tracker
+        self.metrics = MetricsTracker(self.output_dir)
+
         # Initialize components
         self.umls_loader = None
         self.preprocessor = None
@@ -63,18 +74,38 @@ class Stage3UMLSMapping:
 
         # Stage 3.0: Load UMLS data
         logger.info("\n[Stage 3.0] Loading UMLS data...")
+        self.metrics.start_stage("Stage 3.0: UMLS Data Loading", input_count=0)
+
         self.umls_loader = UMLSLoader(self.config)
         umls_concepts = self.umls_loader.load()
 
+        # Compute metrics
+        stage0_metrics = Stage0Metrics.compute(self.umls_loader)
+        for key, value in stage0_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(umls_concepts))
+
         # Stage 3.1: Preprocessing
         logger.info("\n[Stage 3.1] Preprocessing entities...")
+        self.metrics.start_stage("Stage 3.1: Preprocessing", input_count=1)
+
         self.preprocessor = Preprocessor(self.config)
         entities = self.preprocessor.process(self.config.kg_clean_path)
 
+        # Compute metrics
+        stage1_metrics = Stage1Metrics.compute(self.preprocessor)
+        for key, value in stage1_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(entities))
+
         # Stage 3.2: Candidate Generation
         logger.info("\n[Stage 3.2] Generating candidates...")
+        self.metrics.start_stage("Stage 3.2: Candidate Generation", input_count=len(entities))
+
         self.candidate_generator = CandidateGenerator(self.config, self.umls_loader)
-        
+
         entity_candidates = {}
         for entity in tqdm(entities.keys(), desc="Generating candidates"):
             candidates = self.candidate_generator.generate_candidates(
@@ -83,34 +114,56 @@ class Stage3UMLSMapping:
             )
             entity_candidates[entity] = candidates
 
+            # Track warnings
+            if len(candidates) == 0:
+                self.metrics.add_warning(f"No candidates found for: {entity}")
+
+        # Compute metrics
+        stage2_metrics = Stage2Metrics.compute(entity_candidates)
+        for key, value in stage2_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(entity_candidates))
+
         if self.config.save_intermediate:
             self._save_json(entity_candidates, "stage32_candidates.json")
 
         # Stage 3.3: Cluster Aggregation
         logger.info("\n[Stage 3.3] Aggregating clusters...")
+        self.metrics.start_stage("Stage 3.3: Cluster Aggregation", input_count=len(entity_candidates))
+
         self.cluster_aggregator = ClusterAggregator(self.config)
-        
+
         # Build entity -> cluster members mapping
         entity_to_cluster = {
             entity: entities[entity].synonym_group
             for entity in entities.keys()
         }
-        
+
         aggregated_candidates = self.cluster_aggregator.aggregate_multiple_clusters(
             entity_candidates,
             entity_to_cluster
         )
+
+        # Compute metrics
+        stage3_metrics = Stage3Metrics.compute(aggregated_candidates)
+        for key, value in stage3_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(aggregated_candidates))
 
         if self.config.save_intermediate:
             self._save_json(aggregated_candidates, "stage33_aggregated.json")
 
         # Stage 3.4: Hard Negative Filtering
         logger.info("\n[Stage 3.4] Filtering hard negatives...")
+        self.metrics.start_stage("Stage 3.4: Hard Negative Filtering", input_count=len(aggregated_candidates))
+
         self.hard_negative_filter = HardNegativeFilter(self.config, self.umls_loader)
-        
+
         # TODO: Build KG context for semantic type inference
         kg_context = {}  # Placeholder
-        
+
         filtered_candidates = {}
         for entity, candidates in tqdm(aggregated_candidates.items(), desc="Filtering"):
             filtered = self.hard_negative_filter.filter_candidates(
@@ -120,25 +173,43 @@ class Stage3UMLSMapping:
             )
             filtered_candidates[entity] = filtered
 
+        # Compute metrics
+        stage4_metrics = Stage4Metrics.compute(filtered_candidates)
+        for key, value in stage4_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(filtered_candidates))
+
         if self.config.save_intermediate:
             self._save_json(filtered_candidates, "stage34_filtered.json")
 
         # Stage 3.5: Cross-Encoder Reranking
         logger.info("\n[Stage 3.5] Reranking with cross-encoder...")
+        self.metrics.start_stage("Stage 3.5: Cross-Encoder Reranking", input_count=len(filtered_candidates))
+
         self.cross_encoder = CrossEncoderReranker(self.config)
-        
+
         reranked_candidates = {}
         for entity, candidates in tqdm(filtered_candidates.items(), desc="Reranking"):
             reranked = self.cross_encoder.rerank(entity, candidates)
             reranked_candidates[entity] = reranked
+
+        # Compute metrics
+        stage5_metrics = Stage5Metrics.compute(reranked_candidates)
+        for key, value in stage5_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(reranked_candidates))
 
         if self.config.save_intermediate:
             self._save_json(reranked_candidates, "stage35_reranked.json")
 
         # Stage 3.6: Confidence Scoring & Propagation
         logger.info("\n[Stage 3.6] Computing confidence & propagating...")
+        self.metrics.start_stage("Stage 3.6: Confidence & Propagation", input_count=len(reranked_candidates))
+
         self.confidence_propagator = ConfidencePropagator(self.config)
-        
+
         # Compute initial mappings
         final_mappings = {}
         for entity, candidates in tqdm(reranked_candidates.items(), desc="Computing confidence"):
@@ -150,14 +221,28 @@ class Stage3UMLSMapping:
             )
             final_mappings[entity] = mapping
 
+            # Track low confidence cases
+            if mapping.tier == 'low':
+                self.metrics.add_warning(f"Low confidence mapping: {entity} -> {mapping.cui} ({mapping.confidence:.3f})")
+
         # Propagate through clusters
         final_mappings = self.confidence_propagator.finalize_all_mappings(
             final_mappings,
             self.preprocessor.synonym_clusters
         )
 
+        # Compute metrics
+        stage6_metrics = Stage6Metrics.compute(final_mappings)
+        for key, value in stage6_metrics.items():
+            self.metrics.add_metric(key, value)
+
+        self.metrics.end_stage(output_count=len(final_mappings))
+
         # Save final results
         self._save_final_outputs(final_mappings)
+
+        # Save all metrics
+        self.metrics.save_metrics()
 
         logger.info("\n" + "=" * 80)
         logger.info("Stage 3 Complete!")
