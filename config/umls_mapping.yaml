@@ -1,0 +1,122 @@
+# UMLS Mapping Pipeline Configuration
+# Copy this file and customize for your project
+
+# =============================================================================
+# INPUT/OUTPUT PATHS
+# =============================================================================
+
+# Input knowledge graph (cleaned)
+kg_clean_path: "./data/kg_clean.txt"
+
+# UMLS data directory (containing RRF files)
+umls_data_dir: "./data/umls/2024AB/META"
+
+# UMLS RRF files
+mrconso_path: "./data/umls/2024AB/META/MRCONSO.RRF"
+mrsty_path: "./data/umls/2024AB/META/MRSTY.RRF"
+mrdef_path: "./data/umls/2024AB/META/MRDEF.RRF"  # Optional
+
+# Output directory (all results saved here)
+output_root: "./outputs"
+
+# UMLS cache directory (processed UMLS data)
+umls_cache_dir: "./outputs/umls_cache"
+
+# =============================================================================
+# STAGE 0: UMLS DATABASE LOADING
+# =============================================================================
+
+# Language filter for UMLS concepts
+umls_language: "ENG"
+
+# =============================================================================
+# STAGE 2 SETUP: SAPBERT + TF-IDF (ONE-TIME)
+# =============================================================================
+
+# SapBERT model
+sapbert_model: "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
+sapbert_batch_size: 256
+sapbert_device: "cuda"  # "cuda" or "cpu"
+sapbert_top_k: 64
+
+# TF-IDF settings
+tfidf_ngram_range: [3, 3]  # Character trigrams
+
+# Precompute embeddings (recommended for production)
+precompute_embeddings: true
+
+# =============================================================================
+# STAGE 2: CANDIDATE GENERATION
+# =============================================================================
+
+# Final number of candidates after ensemble
+ensemble_final_k: 128
+
+# =============================================================================
+# STAGE 3: CLUSTER AGGREGATION
+# =============================================================================
+
+# Number of candidates to keep after aggregation
+cluster_output_k: 64
+
+# =============================================================================
+# STAGE 4: HARD NEGATIVE FILTERING
+# =============================================================================
+
+# String similarity threshold for identifying hard negatives
+hard_neg_similarity_threshold: 0.7
+
+# Number of candidates to keep after filtering
+hard_neg_output_k: 32
+
+# =============================================================================
+# STAGE 5: CROSS-ENCODER RERANKING
+# =============================================================================
+
+# Cross-encoder model (currently using approximation)
+cross_encoder_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+cross_encoder_device: "cuda"  # "cuda" or "cpu"
+
+# =============================================================================
+# STAGE 6: CONFIDENCE SCORING
+# =============================================================================
+
+# High confidence threshold (>=0.75)
+confidence_high_threshold: 0.75
+
+# Minimum cluster agreement for confidence propagation
+propagation_min_agreement: 0.8
+
+# =============================================================================
+# GENERAL SETTINGS
+# =============================================================================
+
+# Number of parallel processes
+num_processes: 10
+
+# Force recompute (ignore cache)
+force_recompute: false
+
+# Save intermediate outputs
+save_intermediate: true
+
+# Default device ("cuda" or "cpu")
+device: "cuda"
+
+# =============================================================================
+# RUNTIME OPTIONS
+# =============================================================================
+
+# Stages to run (leave empty to run all)
+# Options: stage0_umls_loading, stage1_preprocessing,
+#          stage2_setup_sapbert, stage2_setup_tfidf,
+#          stage2_candidate_generation, stage3_cluster_aggregation,
+#          stage4_hard_negative_filtering, stage5_cross_encoder_reranking,
+#          stage6_final_output
+stages: []
+
+# Resume from last successful stage
+resume: false
+
+# Force rerun completed stages
+force: false
