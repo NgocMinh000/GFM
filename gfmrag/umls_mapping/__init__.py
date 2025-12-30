@@ -32,6 +32,7 @@ from .metrics import (
     Stage5Metrics,
     Stage6Metrics,
 )
+from .validation import Stage1Validator
 
 __all__ = [
     "UMLSMappingConfig",
@@ -50,6 +51,7 @@ __all__ = [
     "Stage4Metrics",
     "Stage5Metrics",
     "Stage6Metrics",
+    "Stage1Validator",
 ]
 
 __version__ = "1.0.0"
