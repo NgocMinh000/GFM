@@ -589,6 +589,7 @@ class KGConstructor(BaseKGConstructor):
         sim_neighbors = self.el_model(processed_phrases, topk=self.max_sim_neighbors)
 
         logger.info("Adding synonymy edges")
+        total_synonym_pairs = 0
         for processed_phrase, neighbors in tqdm(sim_neighbors.items()):
             synonyms = []  # [(phrase_id, score)]
             if len(re.sub("[^A-Za-z0-9]", "", processed_phrase)) > 2:
@@ -616,3 +617,10 @@ class KGConstructor(BaseKGConstructor):
                                 synonyms.append((original_neighbor, n_score))
                                 graph[(original_phrase, original_neighbor)] = "equivalent"
                                 num_nns += 1
+                                total_synonym_pairs += 1
+
+                    # Log synonym pairs found for this entity (for debugging)
+                    if synonyms:
+                        logger.debug(f"Entity '{original_phrase}' -> Found {len(synonyms)} synonyms: {synonyms}")
+
+        logger.info(f"Added {total_synonym_pairs} synonym pairs in total")
