@@ -145,6 +145,11 @@ class ColbertELModel(BaseELModel):
         # Search với ColBERT
         results = self.colbert_model.search(queries, k=topk)
 
+        # Debug: Log raw result structure
+        logger.debug(f"ColBERT search returned results type: {type(results)}")
+        if results and len(results) > 0:
+            logger.debug(f"First result type: {type(results[0])}, Sample: {results[0][:2] if results[0] else 'Empty'}")
+
         # Format kết quả
         linked_entity_dict: dict[str, list] = {}
         for i in range(len(queries)):
@@ -154,7 +159,13 @@ class ColbertELModel(BaseELModel):
 
             # Validate result format
             if not result:
+                logger.debug(f"Empty result for query '{query}'")
                 continue
+
+            # Debug: Check raw result structure
+            logger.debug(f"Query '{query}' got {len(result)} results")
+            if result:
+                logger.debug(f"First result type: {type(result[0])}, content: {str(result[0])[:100]}")
 
             # Check if results are in expected format
             valid_results = []
@@ -171,14 +182,15 @@ class ColbertELModel(BaseELModel):
                             "score": r["score"]
                         })
                     else:
-                        logger.warning(f"Unexpected result format for query '{query}': {r}")
+                        logger.warning(f"Unexpected result format for query '{query}': keys={list(r.keys())}")
                 elif isinstance(r, str):
                     # If result is just a string, skip it with warning
-                    logger.warning(f"Got string result instead of dict for query '{query}': {r}")
+                    logger.warning(f"Got string result instead of dict for query '{query}': '{r[:50]}...'")
                 else:
                     logger.warning(f"Unexpected result type for query '{query}': {type(r)}")
 
             if not valid_results:
+                logger.warning(f"No valid results for query '{query}' after format validation. Total results: {len(result)}")
                 continue
 
             # Tính max_score để normalize (default 1.0 tránh division by zero)
@@ -195,3 +207,42 @@ class ColbertELModel(BaseELModel):
                 )
 
         return linked_entity_dict
+
+    def compute_pairwise_similarity(self, entity1: str, entity2: str) -> float:
+        """
+        Compute pairwise similarity between two entities using ColBERT.
+
+        This method indexes entity2 and searches for entity1, returning the similarity score.
+        Useful for evaluating entity resolution quality.
+
+        Args:
+            entity1: First entity string
+            entity2: Second entity string
+
+        Returns:
+            float: Similarity score (0-1), or 0.0 if computation fails
+
+        Example:
+            >>> model = ColbertELModel()
+            >>> model.compute_pairwise_similarity("aspirin", "acetylsalicylic acid")
+            0.856
+        """
+        try:
+            # Index the second entity
+            self.index([entity2])
+
+            # Search for the first entity
+            result_dict = self([entity1], topk=1)
+
+            # Extract score
+            cleaned_entity1 = processing_phrases(entity1)
+            if cleaned_entity1 in result_dict and result_dict[cleaned_entity1]:
+                # Return the raw score (not normalized)
+                return result_dict[cleaned_entity1][0].get("score", 0.0)
+            else:
+                logger.warning(f"No results found for pairwise similarity: '{entity1}' vs '{entity2}'")
+                return 0.0
+
+        except Exception as e:
+            logger.error(f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}")
+            return 0.0
