@@ -212,12 +212,19 @@ class ColbertELModel(BaseELModel):
         """
         Compute pairwise similarity between two entities using ColBERT.
 
+        ⚠️  WARNING: This method will OVERWRITE the current index!
+        If you have already indexed a large collection, consider using the standalone
+        utility function instead:
+
+        >>> from gfmrag.kg_construction.entity_linking_model.colbert_utils import compute_colbert_pairwise_similarity
+        >>> score = compute_colbert_pairwise_similarity(searcher, entity1, entity2)
+
         This method indexes entity2 and searches for entity1, returning the similarity score.
-        Useful for evaluating entity resolution quality.
+        Useful for quick pairwise comparisons or evaluating entity resolution quality.
 
         Args:
-            entity1: First entity string
-            entity2: Second entity string
+            entity1: First entity string (query)
+            entity2: Second entity string (indexed as reference)
 
         Returns:
             float: Similarity score (0-1), or 0.0 if computation fails
@@ -226,6 +233,11 @@ class ColbertELModel(BaseELModel):
             >>> model = ColbertELModel()
             >>> model.compute_pairwise_similarity("aspirin", "acetylsalicylic acid")
             0.856
+
+        Note:
+            - ColBERT similarity is asymmetric: sim(A, B) may differ from sim(B, A)
+            - This implementation uses entity1 as query, entity2 as document
+            - For batch pairwise computations, use batch_compute_colbert_similarity()
         """
         try:
             # Index the second entity

@@ -85,31 +85,42 @@ def compute_colbert_pairwise_similarity(
     """
     Compute pairwise similarity between two entities using ColBERT searcher.
 
-    This function handles the search and score extraction with proper error handling.
-    Fixes the "string indices must be integers, not 'str'" error.
+    ⚠️  Note: This function assumes entity2 is already in the searcher's index!
+    If you need to compute similarity between arbitrary entities, use:
+
+    >>> from gfmrag.kg_construction.entity_linking_model import ColbertELModel
+    >>> model = ColbertELModel()
+    >>> model.compute_pairwise_similarity(entity1, entity2)
+
+    This function is designed for batch scoring where entities are pre-indexed.
+    It searches entity1 in the index and returns the top match score.
 
     Args:
-        searcher: RAGPretrainedModel instance (already loaded)
-        entity1: First entity string
-        entity2: Second entity string
-        index_name: Optional index name to use (if not already set)
+        searcher: RAGPretrainedModel instance with pre-indexed entities
+        entity1: Query entity string
+        entity2: Reference entity (should be in index) - used for logging only
+        index_name: Optional index name (currently unused)
 
     Returns:
         float: Similarity score (0-1), or 0.0 if computation fails
 
     Example:
         >>> from ragatouille import RAGPretrainedModel
-        >>> searcher = RAGPretrainedModel.from_index("path/to/index")
-        >>> score = compute_colbert_pairwise_similarity(searcher, "aspirin", "acetylsalicylic acid")
+        >>> searcher = RAGPretrainedModel.from_index("path/to/entity/index")
+        >>> # Assumes "acetylsalicylic acid" is in the index
+        >>> score = compute_colbert_pairwise_similarity(
+        ...     searcher, "aspirin", "acetylsalicylic acid"
+        ... )
         >>> print(f"Similarity: {score:.3f}")
     """
     try:
-        # Search for entity1 in the index
+        # Search for entity1 in the index (which should contain entity2)
         results = searcher.search(query=entity1, k=1)
 
         # Extract score from results
         score = extract_colbert_score(results, entity1, fallback=0.0)
 
+        logger.debug(f"Pairwise similarity '{entity1}' -> '{entity2}': {score:.3f}")
         return score
 
     except Exception as e:
