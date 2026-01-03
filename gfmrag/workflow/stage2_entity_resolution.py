@@ -1292,10 +1292,12 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
     def _compute_colbert_similarity(self, entity1: str, entity2: str) -> float:
         """
-        Compute ColBERT similarity between two entities.
+        Compute ColBERT similarity between two entities using pairwise comparison.
 
-        Uses the indexed ColBERT model to perform late interaction similarity.
-        Query entity1 and check similarity with entity2 in the results.
+        Instead of searching in top-k results, this method computes direct
+        pairwise similarity by temporarily indexing one entity and querying
+        with the other. This ensures we get a similarity score even if the
+        entities wouldn't appear in each other's top-k results.
 
         Args:
             entity1: First entity name
@@ -1309,28 +1311,16 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
             return 0.0
 
         try:
-            # Query entity1 against the index
-            results = self.colbert_model([entity1], topk=self.config.colbert_topk)
+            # Use the built-in pairwise similarity method
+            # This temporarily indexes entity2 and queries with entity1
+            score = self.colbert_model.compute_pairwise_similarity(entity1, entity2)
 
-            # Check if entity2 is in the results
-            if entity1 not in results:
+            # Validate score is a valid number
+            if not isinstance(score, (int, float)) or score < 0:
+                logger.warning(f"Invalid ColBERT score {score} for '{entity1}' vs '{entity2}', returning 0.0")
                 return 0.0
 
-            candidates = results[entity1]
-
-            # Find entity2 in the candidates
-            for candidate in candidates:
-                # Use processing_phrases for consistent comparison
-                from gfmrag.kg_construction.utils import processing_phrases
-                candidate_entity = processing_phrases(candidate["entity"])
-                target_entity = processing_phrases(entity2)
-
-                if candidate_entity == target_entity:
-                    # Return normalized score
-                    return float(candidate["norm_score"])
-
-            # If entity2 not found in top-k results, return 0.0
-            return 0.0
+            return float(score)
 
         except Exception as e:
             logger.warning(f"ColBERT similarity computation failed for '{entity1}' and '{entity2}': {e}")
