@@ -7,6 +7,7 @@ ColBERT: Neural IR model với late interaction mechanism
 """
 
 import hashlib
+import logging
 import os
 import shutil
 
@@ -15,6 +16,8 @@ from ragatouille import RAGPretrainedModel
 from gfmrag.kg_construction.utils import processing_phrases
 
 from .base_model import BaseELModel
+
+logger = logging.getLogger(__name__)
 
 
 class ColbertELModel(BaseELModel):
@@ -148,12 +151,41 @@ class ColbertELModel(BaseELModel):
             query = queries[i]
             result = results[i]
             linked_entity_dict[query] = []
-            
+
+            # Validate result format
+            if not result:
+                continue
+
+            # Check if results are in expected format
+            valid_results = []
+            for r in result:
+                # Handle different result formats from RAGatouille
+                if isinstance(r, dict):
+                    # Expected format: dict with 'content' and 'score' keys
+                    if "content" in r and "score" in r:
+                        valid_results.append(r)
+                    # Alternative format: 'text' instead of 'content'
+                    elif "text" in r and "score" in r:
+                        valid_results.append({
+                            "content": r["text"],
+                            "score": r["score"]
+                        })
+                    else:
+                        logger.warning(f"Unexpected result format for query '{query}': {r}")
+                elif isinstance(r, str):
+                    # If result is just a string, skip it with warning
+                    logger.warning(f"Got string result instead of dict for query '{query}': {r}")
+                else:
+                    logger.warning(f"Unexpected result type for query '{query}': {type(r)}")
+
+            if not valid_results:
+                continue
+
             # Tính max_score để normalize (default 1.0 tránh division by zero)
-            max_score = max([r["score"] for r in result]) if result else 1.0
+            max_score = max([r["score"] for r in valid_results])
 
             # Thêm candidates với normalized scores
-            for r in result:
+            for r in valid_results:
                 linked_entity_dict[query].append(
                     {
                         "entity": r["content"],          # Entity từ KB
