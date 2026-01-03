@@ -148,7 +148,11 @@ class ColbertELModel(BaseELModel):
         # Debug: Log raw result structure
         logger.debug(f"ColBERT search returned results type: {type(results)}")
         if results and len(results) > 0:
-            logger.debug(f"First result type: {type(results[0])}, Sample: {results[0][:2] if results[0] else 'Empty'}")
+            try:
+                sample = str(results[0])[:100] if results[0] else 'Empty'
+            except Exception:
+                sample = f"<{type(results[0]).__name__}>"
+            logger.debug(f"First result type: {type(results[0])}, Sample: {sample}")
 
         # Format kết quả
         linked_entity_dict: dict[str, list] = {}
@@ -165,7 +169,11 @@ class ColbertELModel(BaseELModel):
             # Debug: Check raw result structure
             logger.debug(f"Query '{query}' got {len(result)} results")
             if result:
-                logger.debug(f"First result type: {type(result[0])}, content: {str(result[0])[:100]}")
+                try:
+                    content_preview = str(result[0])[:100]
+                except Exception:
+                    content_preview = f"<{type(result[0]).__name__}>"
+                logger.debug(f"First result type: {type(result[0])}, content: {content_preview}")
 
             # Check if results are in expected format
             valid_results = []
@@ -185,9 +193,18 @@ class ColbertELModel(BaseELModel):
                         logger.warning(f"Unexpected result format for query '{query}': keys={list(r.keys())}")
                 elif isinstance(r, str):
                     # If result is just a string, skip it with warning
-                    logger.warning(f"Got string result instead of dict for query '{query}': '{r[:50]}...'")
+                    try:
+                        preview = r[:50] if len(r) > 50 else r
+                    except Exception:
+                        preview = "<unable to preview>"
+                    logger.warning(f"Got string result instead of dict for query '{query}': '{preview}...'")
                 else:
-                    logger.warning(f"Unexpected result type for query '{query}': {type(r)}")
+                    # Handle any other unexpected types
+                    try:
+                        type_info = f"{type(r).__name__}: {str(r)[:50]}"
+                    except Exception:
+                        type_info = f"{type(r).__name__}"
+                    logger.warning(f"Unexpected result type for query '{query}': {type_info}")
 
             if not valid_results:
                 logger.warning(f"No valid results for query '{query}' after format validation. Total results: {len(result)}")
