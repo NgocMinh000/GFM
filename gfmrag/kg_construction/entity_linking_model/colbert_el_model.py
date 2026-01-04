@@ -211,17 +211,44 @@ class ColbertELModel(BaseELModel):
                 continue
 
             # Debug: Check raw result structure
-            logger.debug(f"Query '{query}' got {len(result)} results")
+            logger.debug(f"Query '{query}' result type: {type(result)}, length: {len(result) if hasattr(result, '__len__') else 'N/A'}")
             if result:
                 try:
-                    content_preview = str(result[0])[:100]
-                except Exception:
-                    content_preview = f"<{type(result[0]).__name__}>"
-                logger.debug(f"First result type: {type(result[0])}, content: {content_preview}")
+                    # Handle both list and dict result formats
+                    if isinstance(result, (list, tuple)) and len(result) > 0:
+                        first_item = result[0]
+                        content_preview = str(first_item)[:100]
+                        logger.debug(f"First result type: {type(first_item)}, content: {content_preview}")
+                    elif isinstance(result, dict):
+                        content_preview = str(result)[:100]
+                        logger.debug(f"Result is dict with keys: {list(result.keys())[:5]}")
+                except Exception as e:
+                    logger.debug(f"Could not preview result: {e}")
 
             # Check if results are in expected format
             valid_results = []
-            for r in result:
+
+            # Handle different result container formats
+            # FAISS returns list of dicts, PLAID might return dict or other formats
+            result_items = []
+            if isinstance(result, (list, tuple)):
+                result_items = result
+            elif isinstance(result, dict):
+                # If result is a dict, it might be a single result or have nested structure
+                # Common format: {'content': [...], 'score': [...]}
+                if 'content' in result and 'score' in result:
+                    # Convert to list of dicts format
+                    contents = result['content'] if isinstance(result['content'], list) else [result['content']]
+                    scores = result['score'] if isinstance(result['score'], list) else [result['score']]
+                    result_items = [{'content': c, 'score': s} for c, s in zip(contents, scores)]
+                else:
+                    logger.warning(f"Unknown dict result format for query '{query}': keys={list(result.keys())}")
+                    continue
+            else:
+                logger.warning(f"Unexpected result container type for query '{query}': {type(result)}")
+                continue
+
+            for r in result_items:
                 # Handle different result formats from RAGatouille
                 if isinstance(r, dict):
                     # Expected format: dict with 'content' and 'score' keys
