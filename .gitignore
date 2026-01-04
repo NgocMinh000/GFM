@@ -61,3 +61,6 @@ poetry.lock
 data/
 checkpoints/
 wandb/
+
+# Downloaded models (too large for Git)
+models/

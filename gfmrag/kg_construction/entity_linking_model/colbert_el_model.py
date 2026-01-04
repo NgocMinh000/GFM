@@ -53,17 +53,31 @@ class ColbertELModel(BaseELModel):
     ) -> None:
         """
         Khởi tạo ColBERT model.
-        
+
         Args:
             model_name_or_path: Path hoặc HF model name
                                Default: "colbert-ir/colbertv2.0"
+                               Nếu local model tồn tại tại models/colbert/colbertv2.0,
+                               sẽ tự động dùng local model đó.
             root: Thư mục lưu index
             force: Xóa index cũ và tạo lại nếu True
         """
-        self.model_name_or_path = model_name_or_path
+        # Ưu tiên dùng local model nếu có (tránh download từ HuggingFace)
+        local_model_path = "models/colbert/colbertv2.0"
+        if os.path.exists(local_model_path) and model_name_or_path == "colbert-ir/colbertv2.0":
+            logger.info(f"Using local ColBERT model from: {local_model_path}")
+            self.model_name_or_path = local_model_path
+        else:
+            self.model_name_or_path = model_name_or_path
+            if not os.path.exists(model_name_or_path):
+                logger.warning(
+                    f"Local model not found at {local_model_path}. "
+                    f"Will download from HuggingFace: {model_name_or_path}"
+                )
+
         self.root = root
         self.force = force
-        
+
         # Load pretrained ColBERT qua RAGatouille wrapper
         self.colbert_model = RAGPretrainedModel.from_pretrained(
             self.model_name_or_path,
