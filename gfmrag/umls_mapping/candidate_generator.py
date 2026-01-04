@@ -214,6 +214,17 @@ class CandidateGenerator:
 
         # Load model
         device = torch.device(self.config.sapbert_device if torch.cuda.is_available() else 'cpu')
+
+        # Log device info
+        if device.type == 'cuda':
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.info(f"✓ Using GPU: {gpu_name} ({gpu_memory:.1f}GB)")
+            logger.info(f"✓ Batch size: {self.config.sapbert_batch_size}")
+        else:
+            logger.warning(f"⚠️  Using CPU (no GPU available)")
+            logger.warning(f"⚠️  Encoding will be VERY slow (~4 hours for 8M names)")
+
         self.sapbert_tokenizer = AutoTokenizer.from_pretrained(self.config.sapbert_model)
         self.sapbert_model = AutoModel.from_pretrained(self.config.sapbert_model).to(device)
         self.sapbert_model.eval()
@@ -243,6 +254,9 @@ class CandidateGenerator:
 
         # Encode in batches
         logger.info(f"Encoding {len(self.umls_names)} UMLS names with SapBERT...")
+        logger.info(f"Estimated time: ~30-60 min with GPU, ~4 hours with CPU")
+        logger.info(f"This is ONE-TIME only. Subsequent runs will use cache (~1 min).")
+
         self.sapbert_embeddings = self._encode_sapbert(self.umls_names)
 
         # Save to cache
