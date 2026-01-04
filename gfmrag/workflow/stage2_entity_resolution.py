@@ -1292,19 +1292,23 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
     def _compute_colbert_similarity(self, entity1: str, entity2: str) -> float:
         """
-        Compute ColBERT similarity between two entities using pairwise comparison.
+        Compute ColBERT similarity between two entities using direct encoding.
 
-        Instead of searching in top-k results, this method computes direct
-        pairwise similarity by temporarily indexing one entity and querying
-        with the other. This ensures we get a similarity score even if the
-        entities wouldn't appear in each other's top-k results.
+        Uses the fixed pairwise similarity method that:
+        - Encodes both entities directly (no indexing, no FAISS)
+        - Computes MaxSim at token level
+        - Returns bidirectional averaged score (symmetric)
 
         Args:
             entity1: First entity name
             entity2: Second entity name
 
         Returns:
-            float: ColBERT similarity score [0.0, 1.0]
+            float: ColBERT similarity score [0.0, 1.0], already bidirectionally averaged
+
+        Note:
+            The returned score is already symmetric (entity1↔entity2 = entity2↔entity1).
+            No need to compute reverse direction separately.
         """
         if self.colbert_model is None:
             logger.warning("ColBERT model not initialized, returning 0.0 similarity")
@@ -1312,7 +1316,7 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
         try:
             # Use the built-in pairwise similarity method
-            # This temporarily indexes entity2 and queries with entity1
+            # This method internally computes bidirectional MaxSim and averages
             score = self.colbert_model.compute_pairwise_similarity(entity1, entity2)
 
             # Validate score is a valid number
@@ -1394,10 +1398,8 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
                 lexical_score = 1.0 - (edit_dist / max_len)
 
             # Feature 3: ColBERT similarity (late interaction)
-            # Compute bidirectional similarity and take average
-            colbert_score_1to2 = self._compute_colbert_similarity(entity1, entity2)
-            colbert_score_2to1 = self._compute_colbert_similarity(entity2, entity1)
-            colbert_score = (colbert_score_1to2 + colbert_score_2to1) / 2.0
+            # compute_pairwise_similarity() already returns bidirectional average
+            colbert_score = self._compute_colbert_similarity(entity1, entity2)
 
             # Feature 4: Graph similarity (Jaccard similarity of neighbors)
             neighbors1 = entity_neighbors.get(entity1, set())
