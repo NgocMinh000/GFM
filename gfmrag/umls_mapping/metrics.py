@@ -208,15 +208,15 @@ class MetricsTracker:
 
 class Stage0Metrics:
     """Metrics for Stage 3.0: UMLS Loader"""
-    
+
     @staticmethod
     def compute(umls_loader) -> Dict[str, Any]:
         return {
             'total_concepts': len(umls_loader.concepts),
-            'total_unique_names': len(umls_loader.name_to_cuis),
-            'avg_names_per_concept': len(umls_loader.name_to_cuis) / max(len(umls_loader.concepts), 1),
+            'total_unique_names': len(umls_loader.umls_aliases),
+            'avg_names_per_concept': len(umls_loader.umls_aliases) / max(len(umls_loader.concepts), 1),
             'concepts_with_definitions': sum(1 for c in umls_loader.concepts.values() if c.definitions),
-            'avg_semantic_types_per_concept': np.mean([len(c.semantic_types) for c in umls_loader.concepts.values()])
+            'avg_semantic_types_per_concept': np.mean([len(c.semantic_types) for c in umls_loader.concepts.values()]) if umls_loader.concepts else 0.0
         }
 
 
