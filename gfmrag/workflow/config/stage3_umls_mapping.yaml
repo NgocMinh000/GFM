@@ -9,7 +9,7 @@ hydra:
 # Input/Output Paths
 input:
   kg_clean_path: tmp/kg_construction/*/hotpotqa/kg_clean.txt  # From Stage 2
-  umls_data_dir: data/umls  # Directory containing UMLS RRF files
+  umls_data_dir: data/umls/META  # Directory containing UMLS RRF files
 
 output:
   root_dir: tmp/umls_mapping
