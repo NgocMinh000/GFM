@@ -126,20 +126,29 @@ def check_stage2_output():
     print("Checking Stage 2 output...")
     print("=" * 80)
 
-    # Look for kg_clean.txt
-    import glob
-    kg_files = glob.glob("tmp/kg_construction/*/hotpotqa/kg_clean.txt")
+    # Check for kg_clean.txt in tmp/entity_resolution/
+    kg_path = Path("tmp/entity_resolution/kg_clean.txt")
 
-    if kg_files:
-        print(f"✓ Found {len(kg_files)} kg_clean.txt file(s):")
-        for filepath in kg_files:
-            size_kb = Path(filepath).stat().st_size / 1024
-            print(f"  - {filepath} ({size_kb:.1f} KB)")
+    if kg_path.exists():
+        size_kb = kg_path.stat().st_size / 1024
+        print(f"✓ Found kg_clean.txt: {kg_path} ({size_kb:.1f} KB)")
+
+        # Check format (should be comma-separated)
+        with open(kg_path, 'r') as f:
+            first_line = f.readline().strip()
+            if ',' in first_line and first_line.count(',') >= 2:
+                print(f"✓ Format looks correct (comma-separated)")
+                print(f"  Sample: {first_line[:80]}...")
+            else:
+                print(f"⚠  Warning: Format might be incorrect")
+                print(f"  Expected: entity1,relation,entity2")
+                print(f"  Found: {first_line[:80]}...")
         return True
     else:
-        print("✗ No kg_clean.txt found")
+        print(f"✗ kg_clean.txt not found at: {kg_path}")
         print("\nStage 3 requires output from Stage 2 Entity Resolution")
-        print("Expected path: tmp/kg_construction/*/hotpotqa/kg_clean.txt")
+        print("Expected path: tmp/entity_resolution/kg_clean.txt")
+        print("Expected format: copper,is a,transition metal (comma-separated)")
         print("\nRun Stage 2 first:")
         print("  python -m gfmrag.workflow.stage2_entity_resolution stage=2")
         return False

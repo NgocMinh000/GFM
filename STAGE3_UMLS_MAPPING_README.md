@@ -84,12 +84,13 @@ pip install matplotlib seaborn
 Pipeline cần output từ Stage 2 Entity Resolution:
 ```bash
 # Kiểm tra file kg_clean.txt tồn tại:
-ls tmp/kg_construction/*/hotpotqa/kg_clean.txt
+ls tmp/entity_resolution/kg_clean.txt
 
-# Format: entity1 | relation | entity2
+# Format: entity1,relation,entity2 (comma-separated)
 # Ví dụ:
-# diabetes mellitus | is_a | disease
-# metformin | treats | diabetes
+# copper,is a,transition metal
+# copper,is a,trace element
+# copper,essential for,cytochrome c oxidase
 ```
 
 ## Sử dụng (Usage)

@@ -107,7 +107,12 @@ class Preprocessor:
         logger.info(f"Saved {len(normalized_dict):,} normalized entities to {normalized_file}")
 
     def _parse_kg_file(self, kg_path: str) -> Tuple[Set[str], List[Tuple[str, str]]]:
-        """Parse kg_clean.txt to extract entities and synonym relationships"""
+        """
+        Parse kg_clean.txt to extract entities and synonym relationships
+
+        Format: comma-separated (head,relation,tail)
+        Example: copper,is a,transition metal
+        """
 
         all_entities = set()
         synonym_pairs = []
@@ -122,8 +127,10 @@ class Preprocessor:
                 if not line or line.startswith('#'):
                     continue
 
-                parts = line.split('|')
+                # Split by comma (not pipe)
+                parts = line.split(',')
                 if len(parts) != 3:
+                    logger.warning(f"Skipping malformed line: {line}")
                     continue
 
                 head = parts[0].strip()
@@ -135,7 +142,7 @@ class Preprocessor:
                 all_entities.add(tail)
 
                 # Collect synonyms_of relationships
-                if relation == 'synonyms_of':
+                if relation.lower() in ['synonyms_of', 'synonym_of', 'is_synonym_of']:
                     synonym_pairs.append((head, tail))
 
         logger.info(f"Found {len(all_entities)} unique entities")

@@ -8,7 +8,7 @@ hydra:
 
 # Input/Output Paths
 input:
-  kg_clean_path: tmp/kg_construction/*/hotpotqa/kg_clean.txt  # From Stage 2
+  kg_clean_path: tmp/entity_resolution/kg_clean.txt  # From Stage 2
   umls_data_dir: data/umls/META  # Directory containing UMLS RRF files
 
 output:
@@ -210,11 +210,11 @@ output_format:
 
 # General Configuration
 general:
-  num_processes: 10       # Parallel processing
+  num_processes: 10       # Parallel processing (CPU threads for non-GPU tasks)
   force_recompute: false  # Force recompute all stages
   save_intermediate: true # Save intermediate outputs
   verbose: true           # Detailed logging
-  device: cuda            # cuda/cpu for GPU operations
+  device: cuda            # PRIORITY: Use GPU (cuda) for maximum speed
   random_seed: 42         # For reproducibility
 
 # Evaluation (if gold standard available)
