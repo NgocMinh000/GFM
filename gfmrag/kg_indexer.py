@@ -23,14 +23,15 @@ class KGIndexer:
     DELIMITER = KG_DELIMITER
 
     def __init__(
-        self, kg_constructor: BaseKGConstructor, qa_constructor: BaseQAConstructor
+        self, kg_constructor: BaseKGConstructor, qa_constructor: BaseQAConstructor = None
     ) -> None:
         """
         Initializes the KGIndexer with the given knowledge graph and QA constructors.
 
         Args:
             kg_constructor (BaseKGConstructor): An instance of a knowledge graph constructor.
-            qa_constructor (BaseQAConstructor): An instance of a QA constructor.
+            qa_constructor (BaseQAConstructor, optional): An instance of a QA constructor.
+                                                          If None, QA preparation will be skipped.
 
         Returns:
             None
@@ -101,19 +102,22 @@ class KGIndexer:
             ) as f:
                 json.dump(doc2entities, f, indent=4)
 
-        # Try to prepare training and testing data from dataset
-        if os.path.exists(
-            os.path.join(raw_data_dir, "train.json")
-        ) and not os.path.exists(os.path.join(prosessed_data_dir, "train.json")):
-            logger.info(f"Preparing {os.path.join(raw_data_dir, 'train.json')}")
-            train_data = self.qa_constructor.prepare_data(root, data_name, "train.json")
-            with open(os.path.join(prosessed_data_dir, "train.json"), "w") as f:
-                json.dump(train_data, f, indent=4)
+        # Try to prepare training and testing data from dataset (only if qa_constructor is provided)
+        if self.qa_constructor is not None:
+            if os.path.exists(
+                os.path.join(raw_data_dir, "train.json")
+            ) and not os.path.exists(os.path.join(prosessed_data_dir, "train.json")):
+                logger.info(f"Preparing {os.path.join(raw_data_dir, 'train.json')}")
+                train_data = self.qa_constructor.prepare_data(root, data_name, "train.json")
+                with open(os.path.join(prosessed_data_dir, "train.json"), "w") as f:
+                    json.dump(train_data, f, indent=4)
 
-        if os.path.exists(
-            os.path.join(raw_data_dir, "test.json")
-        ) and not os.path.exists(os.path.join(prosessed_data_dir, "test.json")):
-            logger.info(f"Preparing {os.path.join(raw_data_dir, 'test.json')}")
-            test_data = self.qa_constructor.prepare_data(root, data_name, "test.json")
-            with open(os.path.join(prosessed_data_dir, "test.json"), "w") as f:
-                json.dump(test_data, f, indent=4)
+            if os.path.exists(
+                os.path.join(raw_data_dir, "test.json")
+            ) and not os.path.exists(os.path.join(prosessed_data_dir, "test.json")):
+                logger.info(f"Preparing {os.path.join(raw_data_dir, 'test.json')}")
+                test_data = self.qa_constructor.prepare_data(root, data_name, "test.json")
+                with open(os.path.join(prosessed_data_dir, "test.json"), "w") as f:
+                    json.dump(test_data, f, indent=4)
+        else:
+            logger.info("QA constructor not provided - skipping QA data preparation")

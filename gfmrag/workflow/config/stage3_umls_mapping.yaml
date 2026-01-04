@@ -1,0 +1,229 @@
+# Stage 3: UMLS Mapping Configuration
+# ======================================
+# Maps biomedical entities to UMLS CUIs through 6-stage pipeline
+
+hydra:
+  run:
+    dir: outputs/umls_mapping/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Input/Output Paths
+input:
+  kg_clean_path: tmp/kg_construction/*/hotpotqa/kg_clean.txt  # From Stage 2
+  umls_data_dir: data/umls  # Directory containing UMLS RRF files
+
+output:
+  root_dir: tmp/umls_mapping
+  final_mappings: outputs/final_umls_mappings.json
+  mapping_triples: outputs/umls_mapping_triples.txt  # For adding to KG
+
+# Stage 3.0: UMLS Data Setup
+umls:
+  files:
+    mrconso: ${input.umls_data_dir}/MRCONSO.RRF  # Concepts and names
+    mrsty: ${input.umls_data_dir}/MRSTY.RRF      # Semantic types
+    mrdef: ${input.umls_data_dir}/MRDEF.RRF      # Definitions (optional)
+  language: ENG  # English only
+  cache_dir: ${input.umls_data_dir}/processed  # Processed indices
+  precompute:
+    embeddings: true   # Precompute SapBERT embeddings (one-time, ~2-3 hours)
+    tfidf: true        # Build TF-IDF index (one-time, ~1 hour)
+    faiss: true        # Build FAISS index (one-time, ~30 mins)
+
+# Stage 3.1: Preprocessing & Data Preparation
+preprocessing:
+  normalize:
+    lowercase: true
+    remove_punctuation: true
+    normalize_whitespace: true
+    expand_abbreviations: true
+    normalize_roman_numerals: true
+  abbreviation_dict_path: null  # Optional: path to custom abbreviations
+  # Built-in medical abbreviations will be used by default
+
+# Stage 3.2: Candidate Generation
+candidate_generation:
+  # Method A: SapBERT (Semantic Similarity)
+  sapbert:
+    model: cambridgeltl/SapBERT-from-PubMedBERT-fulltext
+    batch_size: 256
+    device: cuda  # cuda/cpu
+    top_k: 64     # Top candidates from SapBERT
+
+  # Method B: TF-IDF Character N-grams
+  tfidf:
+    analyzer: char          # Character-level
+    ngram_range: [3, 3]     # Trigrams
+    min_df: 2               # Minimum document frequency
+    top_k: 64               # Top candidates from TF-IDF
+
+  # Ensemble Fusion (Reciprocal Rank Fusion)
+  ensemble:
+    method: reciprocal_rank_fusion  # RRF
+    k_constant: 60                  # RRF constant
+    diversity_bonus: 0.05            # Bonus for multiple method agreement
+    final_k: 128                    # Final number of candidates
+
+# Stage 3.3: Synonym Cluster Aggregation
+cluster_aggregation:
+  score_weights:
+    avg_score: 0.6           # Weight for average candidate score
+    cluster_consensus: 0.3   # Weight for cluster agreement
+    method_diversity: 0.1    # Weight for method diversity
+  outlier_detection:
+    enabled: true
+    threshold: 0.5           # Mark as outlier if disagreement > threshold
+  output_k: 64               # Refined candidates after aggregation
+
+# Stage 3.4: Hard Negative Filtering & Semantic Type Checking
+hard_negative_filtering:
+  # Hard Negative Detection
+  hard_negative:
+    similarity_threshold: 0.7  # Pairs with string sim > 0.7 but different CUIs
+    penalty_weight: 0.1        # Penalty for hard negatives in top-10
+
+  # Semantic Type Groups (UMLS Semantic Network)
+  semantic_type_groups:
+    disease:
+      - Disease or Syndrome
+      - Neoplastic Process
+      - Mental or Behavioral Dysfunction
+      - Pathologic Function
+      - Sign or Symptom
+    drug:
+      - Pharmacologic Substance
+      - Antibiotic
+      - Immunologic Factor
+      - Vitamin
+      - Hormone
+    procedure:
+      - Therapeutic or Preventive Procedure
+      - Diagnostic Procedure
+      - Laboratory Procedure
+      - Health Care Activity
+    anatomy:
+      - Body Part, Organ, or Organ Component
+      - Tissue
+      - Cell
+      - Body System
+    biological:
+      - Amino Acid, Peptide, or Protein
+      - Enzyme
+      - Nucleic Acid, Nucleoside, or Nucleotide
+      - Biologically Active Substance
+
+  # Semantic Type Inference from KG
+  type_inference:
+    enabled: true
+    use_kg_relations: true  # Infer from relations (treats → drug, etc.)
+
+  # Scoring
+  score_weights:
+    base_score: 0.7
+    type_match: 0.2
+    hard_negative_penalty: 0.1
+
+  output_k: 32  # Filtered candidates
+
+# Stage 3.5: Cross-Encoder Reranking
+cross_encoder:
+  # Model Configuration
+  model: microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext
+  pretrained_path: null  # Path to fine-tuned model (if available)
+  device: cuda
+
+  # Training (Optional - only if you want to fine-tune)
+  training:
+    enabled: false  # Set true to train
+    dataset: medmentions  # medmentions/bc5cdr/ncbi_disease
+    dataset_path: null    # Path to dataset
+    epochs: 10
+    batch_size: 16
+    learning_rate: 2e-5
+    warmup_steps: 500
+    weight_decay: 0.01
+    hard_negative_weight: 3.0  # Weight for hard negatives in training
+    output_dir: models/cross_encoder
+
+  # Inference
+  inference:
+    batch_size: 32
+    max_length: 256  # Max tokens for input
+
+  # Final Scoring
+  score_weights:
+    cross_encoder: 0.7      # Cross-encoder score
+    previous_stage: 0.3     # Score from Stage 3.4
+
+# Stage 3.6: Confidence Scoring & Graph Propagation
+confidence:
+  # Multi-Factor Confidence Computation
+  factors:
+    score_margin: 0.35      # Gap between top-1 and top-2
+    absolute_score: 0.25    # Absolute score of top-1
+    cluster_consensus: 0.25 # Agreement within synonym cluster
+    method_agreement: 0.15  # Number of methods agreeing
+
+  # Confidence Tiers
+  tiers:
+    high: 0.75    # >= 0.75
+    medium: 0.50  # 0.50 - 0.75
+    low: 0.0      # < 0.50
+
+  # Graph Propagation Through Synonym Clusters
+  propagation:
+    enabled: true
+    min_cluster_agreement: 0.8  # Propagate if >= 80% entities agree
+    confidence_penalty: 0.9     # Propagated confidence = best * 0.9
+    max_cluster_size: 20        # Don't propagate for very large clusters
+
+  # Alternative Suggestions (for medium/low confidence)
+  alternatives:
+    include_for_tiers: [medium, low]
+    max_alternatives: 3  # Top N alternatives to include
+
+# Output Configuration
+output_format:
+  # Main output: JSON with full details
+  json:
+    include_alternatives: true
+    include_cluster_info: true
+    include_semantic_types: true
+    include_scores: true
+
+  # Triples for KG: entity | mapped_to_cui | CUI
+  triples:
+    enabled: true
+    min_confidence: 0.5  # Only include if confidence >= 0.5
+
+  # Statistics & Quality Metrics
+  statistics:
+    enabled: true
+    include_cluster_stats: true
+    include_confidence_distribution: true
+    include_coverage_metrics: true
+
+  # Manual Review Queue (uncertain cases)
+  review_queue:
+    enabled: true
+    low_confidence_threshold: 0.5
+    cluster_conflict_threshold: 0.6
+
+# General Configuration
+general:
+  num_processes: 10       # Parallel processing
+  force_recompute: false  # Force recompute all stages
+  save_intermediate: true # Save intermediate outputs
+  verbose: true           # Detailed logging
+  device: cuda            # cuda/cpu for GPU operations
+  random_seed: 42         # For reproducibility
+
+# Evaluation (if gold standard available)
+evaluation:
+  enabled: false
+  gold_standard_path: null  # Path to gold standard annotations
+  metrics:
+    - top1_accuracy
+    - recall_at_5
+    - recall_at_10
+    - mrr  # Mean Reciprocal Rank
+    - confidence_calibration

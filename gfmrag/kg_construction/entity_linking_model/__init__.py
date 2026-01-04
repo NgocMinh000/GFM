@@ -8,6 +8,10 @@ from .colbert_utils import (
     validate_colbert_index,
     debug_colbert_results,
 )
+from .safe_colbert import (
+    safe_colbert_search,
+    safe_colbert_pairwise_similarity,
+)
 
 __all__ = [
     "BaseELModel",
@@ -19,4 +23,6 @@ __all__ = [
     "batch_compute_colbert_similarity",
     "validate_colbert_index",
     "debug_colbert_results",
+    "safe_colbert_search",
+    "safe_colbert_pairwise_similarity",
 ]

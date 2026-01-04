@@ -47,19 +47,21 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
 
 # ============================================================================
-# VÍ DỤ MẪU DÙNG CHUNG (One-shot Example)
+# VÍ DỤ MẪU DÙNG CHUNG (One-shot Example) - MEDICAL DOMAIN
 # ============================================================================
-# Đoạn văn mẫu về Radio City dùng để minh họa cho cả NER và OpenIE
+# Đoạn văn mẫu về medical domain để hướng dẫn model focus vào entities/relations y tế
 
-one_shot_passage = """Radio City
-Radio City is India's first private FM radio station and was started on 3 July 2001.
-It plays Hindi, English and regional songs.
-Radio City recently forayed into New Media in May 2008 with the launch of a music portal - PlanetRadiocity.com that offers music related news, videos, songs, and other music-related features."""
+one_shot_passage = """Metformin in Type 2 Diabetes
+Metformin is a first-line medication for the treatment of type 2 diabetes, particularly in people who are overweight.
+It works by decreasing glucose production in the liver and improving insulin sensitivity in peripheral tissues.
+Common side effects include nausea, diarrhea, and abdominal pain.
+Metformin has been shown to reduce the risk of cardiovascular disease and may help prevent the progression from prediabetes to type 2 diabetes.
+The medication is contraindicated in patients with severe renal impairment or acute kidney injury."""
 
-# Output mẫu cho NER: Danh sách các thực thể có tên
-# Bao gồm: tên tổ chức, địa điểm, thời gian, ngôn ngữ, website
+# Output mẫu cho NER: Danh sách các thực thể y tế
+# Bao gồm: thuốc, bệnh, triệu chứng, bộ phận cơ thể, protein/hormone
 one_shot_passage_entities = """{"named_entities":
-    ["Radio City", "India", "3 July 2001", "Hindi", "English", "May 2008", "PlanetRadiocity.com"]
+    ["Metformin", "type 2 diabetes", "glucose", "liver", "insulin", "peripheral tissues", "nausea", "diarrhea", "abdominal pain", "cardiovascular disease", "prediabetes", "renal impairment", "acute kidney injury"]
 }
 """
 
@@ -67,12 +69,76 @@ one_shot_passage_entities = """{"named_entities":
 # NER PROMPTS - Hướng dẫn cho Named Entity Recognition
 # ============================================================================
 
-ner_instruction = """Your task is to extract named entities from the given paragraph.
-Respond with a JSON list of entities.
-Strictly follow the required JSON format.
+ner_instruction = """Your task is to extract MEDICAL and BIOLOGICAL named entities from the given paragraph.
+
+Focus on entities directly related to healthcare, medicine, and biological sciences. Be precise and prioritize medical relevance.
+
+=== CATEGORIES TO EXTRACT ===
+
+Extract specific medical/biological entities from these categories:
+
+1. **Drugs & Chemicals**: Specific medications, compounds, therapeutic substances
+   • Include: Metformin, Prednisone, Oxygen, beclomethasone dipropionate, cortisol, glucose
+   • Exclude: Generic terms like "medicine", "drug", "treatment"
+
+2. **Diseases & Conditions**: Specific medical conditions, syndromes, disorders
+   • Include: type 2 diabetes, hypertension, ichthyosis, aldosteronism, seizures
+   • Exclude: Generic terms like "disease", "condition", "illness"
+
+3. **Symptoms & Signs**: Specific clinical manifestations
+   • Include: fever, nausea, inflammation, alopecia, ectropion, hypoxia
+   • Exclude: Generic terms like "symptom", "sign"
+
+4. **Anatomy**: Specific body structures, organs, tissues, cells
+   • Include: liver, adrenal cortex, pancreas, blood vessels, cornea
+   • Exclude: Generic terms like "body", "organ", "tissue"
+
+5. **Biological Entities**: Specific proteins, hormones, genes, enzymes
+   • Include: insulin, hemoglobin, TP53, cytochrome c oxidase, glucocorticoid
+   • Exclude: Generic terms like "protein", "hormone", "enzyme"
+
+6. **Medical Procedures**: Specific treatments or diagnostic procedures
+   • Include: chemotherapy, dialysis, MRI scan, transplantation
+   • Exclude: Generic terms like "therapy", "treatment", "procedure"
+
+=== WHAT NOT TO EXTRACT ===
+
+Do NOT extract:
+- Generic/common nouns: "patients", "people", "doctors", "medicine", "therapy"
+- Pure numbers/measurements: "94%", "8 hours", "100mg"
+- Properties: "half-life", "protein binding", "clearance", "absorption"
+- Routes: "oral", "intravenous" (alone)
+- Adjectives: "high", "severe", "chronic" (alone)
+- Time/dates: "2025", "Monday", "morning"
+
+=== GUIDELINES ===
+
+✓ Only extract if the entity has clear MEDICAL/BIOLOGICAL specificity
+✓ Prefer specific entity names over generic categories
+✓ Keep proper formatting for chemical/medical names
+✓ Include long disease syndrome names if they are specific
+✓ When in doubt, ask: "Is this a SPECIFIC medical/biological entity?"
+
+=== EXAMPLES ===
+
+Text: "Hydrocortisone is a glucocorticoid produced by the adrenal cortex with a half-life of 8 hours."
+✓ Extract: ["Hydrocortisone", "glucocorticoid", "adrenal cortex"]
+✗ Skip: "half-life", "8 hours"
+
+Text: "Oxygen therapy treats hypoxia in patients with respiratory failure."
+✓ Extract: ["Oxygen", "hypoxia", "respiratory failure"]
+✗ Skip: "therapy", "patients" (too generic)
+
+Text: "The patient received treatment for severe pain and inflammation."
+✓ Extract: ["pain", "inflammation"]
+✗ Skip: "patient", "treatment", "severe" (generic/adjective)
+
+Respond with a JSON list of named entities.
+Format: {"named_entities": ["entity1", "entity2", ...]}
 """
-# Hướng dẫn: Nhiệm vụ là trích xuất các thực thể có tên từ đoạn văn
-# Yêu cầu: Trả về dạng JSON list, tuân thủ nghiêm ngặt định dạng JSON
+# Hướng dẫn: Nhiệm vụ là trích xuất CÁC THỰC THỂ Y TẾ từ đoạn văn
+# Focus: Chỉ extract medical/healthcare entities
+# Exclude: Non-medical general entities
 
 # Input mẫu cho NER: Đoạn văn được bọc trong ``` để dễ nhận dạng
 ner_input_one_shot = f"""Paragraph:
@@ -103,34 +169,155 @@ ner_prompts = ChatPromptTemplate.from_messages(
 # OpenIE PROMPTS - Hướng dẫn cho Open Information Extraction
 # ============================================================================
 
-# Output mẫu cho OpenIE: Danh sách các bộ ba (triples)
+# Output mẫu cho OpenIE: Danh sách các bộ ba (triples) - MEDICAL DOMAIN
 # Mỗi triple có dạng [subject, predicate, object]
-# LƯU Ý: Có lỗi cú pháp JSON ở dòng 5 (thiếu dấu phẩy) - đây có thể là cố ý
-# để test khả năng xử lý lỗi của mô hình
+# Focus: Chỉ trích xuất relations liên quan đến y tế, normalized to canonical forms
 one_shot_passage_triples = """{"triples": [
-            ["Radio City", "located in", "India"],
-            ["Radio City", "is", "private FM radio station"],
-            ["Radio City", "started on", "3 July 2001"],
-            ["Radio City", "plays songs in", "Hindi"],
-            ["Radio City", "plays songs in", "English"]
-            ["Radio City", "forayed into", "New Media"],
-            ["Radio City", "launched", "PlanetRadiocity.com"],
-            ["PlanetRadiocity.com", "launched in", "May 2008"],
-            ["PlanetRadiocity.com", "is", "music portal"],
-            ["PlanetRadiocity.com", "offers", "news"],
-            ["PlanetRadiocity.com", "offers", "videos"],
-            ["PlanetRadiocity.com", "offers", "songs"]
+            ["Metformin", "is_a", "first-line medication"],
+            ["Metformin", "treats", "type 2 diabetes"],
+            ["Metformin", "decreases", "glucose production"],
+            ["glucose", "produced_in", "liver"],
+            ["Metformin", "improves", "insulin sensitivity"],
+            ["insulin", "acts_on", "peripheral tissues"],
+            ["Metformin", "causes", "nausea"],
+            ["Metformin", "causes", "diarrhea"],
+            ["Metformin", "causes", "abdominal pain"],
+            ["Metformin", "prevents", "cardiovascular disease"],
+            ["Metformin", "prevents", "prediabetes"],
+            ["prediabetes", "progresses_to", "type 2 diabetes"],
+            ["Metformin", "contraindicated_in", "renal impairment"],
+            ["Metformin", "contraindicated_in", "acute kidney injury"]
     ]
 }
 """
 
 # Hướng dẫn cho OpenIE Post-NER
-openie_post_ner_instruction = """Your task is to construct an RDF (Resource Description Framework) graph from the given passages and named entity lists.
-Respond with a JSON list of triples, with each triple representing a relationship in the RDF graph.
+openie_post_ner_instruction = """Your task is to construct a MEDICAL RDF (Resource Description Framework) graph from the given passages and named entity lists.
+Respond with a JSON list of triples, with each triple representing a MEDICAL relationship in the RDF graph.
 
-Pay attention to the following requirements:
-- Each triple should contain at least one, but preferably two, of the named entities in the list for each passage.
-- Clearly resolve pronouns to their specific names to maintain clarity.
+CRITICAL REQUIREMENTS:
+1. You MUST ONLY use entities from the provided named_entities list
+2. Each triple MUST contain at least ONE entity from the named_entities list (preferably BOTH subject and object)
+3. DO NOT create new entities that are not in the named_entities list
+4. After extracting relationships, you MUST NORMALIZE them to canonical forms to ensure consistency
+
+=== RELATIONSHIP EXTRACTION & NORMALIZATION PROCESS ===
+
+Step 1: Identify entities from the named_entities list in the text
+Step 2: Extract relationships ONLY between these identified entities
+Step 3: NORMALIZE the relationship to the most common canonical form following the guidelines below
+
+=== CANONICAL MEDICAL RELATIONSHIP FORMS ===
+
+Use these CANONICAL forms (standardized, concise, medical terminology):
+
+1. THERAPEUTIC RELATIONSHIPS:
+   • treats (NOT "is used to treat", "helps treat", "used for")
+   • prevents (NOT "helps prevent", "can prevent")
+   • manages (NOT "helps manage", "used to manage")
+   • indicated_for (NOT "indicated in", "prescribed for")
+   • contraindicated_in (NOT "should not be used in")
+
+2. CAUSATION RELATIONSHIPS:
+   • causes (NOT "can cause", "may cause", "leads to")
+   • triggers (for acute events)
+   • induces (for physiological changes)
+
+3. AMELIORATION RELATIONSHIPS:
+   • alleviates (NOT "helps with", "relieves")
+   • reduces (NOT "decreases", "lowers" - use "reduces" for symptoms)
+   • improves (NOT "helps improve")
+
+4. PRESENTATION RELATIONSHIPS:
+   • presents_with (NOT "shows", "has symptoms of")
+   • characterized_by (NOT "characterized as", "marked by")
+   • associated_with (NOT "linked to", "related to", "connected to")
+
+5. ANATOMICAL RELATIONSHIPS:
+   • affects (NOT "impacts", "influences")
+   • damages (NOT "harms", "injures")
+   • located_in (NOT "found in", "occurs in")
+
+6. MECHANISM RELATIONSHIPS:
+   • inhibits (NOT "blocks", "suppresses" - use "inhibits" for pharmacology)
+   • activates (NOT "stimulates", "triggers")
+   • increases (for upregulation)
+   • decreases (for downregulation)
+   • binds_to (for molecular binding)
+   • targets (for drug targets)
+
+7. METABOLIC RELATIONSHIPS:
+   • metabolized_by (NOT "metabolized in", "broken down by")
+   • secreted_by (NOT "secreted from", "produced by" - use for hormones/enzymes)
+   • synthesized_in (for biosynthesis)
+   • excreted_by (for elimination)
+
+8. CLASSIFICATION RELATIONSHIPS:
+   • is_a (NOT "is", "is type of", "classified as")
+   • subtype_of (for disease subtypes)
+
+9. PROGRESSION RELATIONSHIPS:
+   • progresses_to (NOT "develops into", "leads to")
+   • complication_of (NOT "complicates")
+   • risk_factor_for (NOT "increases risk of", "risk for")
+
+10. DIAGNOSTIC/PROCEDURAL:
+    • diagnoses (NOT "used to diagnose")
+    • monitors (NOT "used to monitor")
+    • detects (for diagnostic tests)
+
+11. GENETIC RELATIONSHIPS:
+    • mutation_causes (for genetic mutations → disease)
+    • encodes (gene → protein)
+    • regulates (for gene regulation)
+
+=== NORMALIZATION EXAMPLES ===
+
+Text says → Normalize to:
+• "is a medication" → "is_a"
+• "Metformin is used to treat diabetes" → "treats"
+• "can cause nausea" → "causes"
+• "helps reduce pain" → "reduces"
+• "is broken down by the liver" → "metabolized_by"
+• "secreted from the pancreas" → "secreted_by"
+• "blocks the enzyme" → "inhibits"
+• "is linked to heart disease" → "associated_with"
+• "leads to kidney failure" → "progresses_to"
+• "shows symptoms of fever" → "presents_with"
+
+=== IMPORTANT RULES ===
+
+1. **ALWAYS normalize** to the canonical form - don't keep verbose forms
+2. **Use underscore notation** (e.g., "is_a", "binds_to", "secreted_by")
+3. **Avoid generic terms**: Never use "relates_to", "linked_to", "connected_to"
+4. **Keep it concise**: "treats" not "is_used_to_treat"
+5. **Be consistent**: Same meaning → same relationship name
+6. **Medical terminology**: Use proper medical verbs when available
+
+=== EXAMPLES OF CORRECT NORMALIZATION ===
+
+✅ CORRECT:
+  ["Metformin", "is_a", "medication"]                    # NOT "is"
+  ["Metformin", "treats", "type 2 diabetes"]             # NOT "is used to treat"
+  ["Metformin", "causes", "nausea"]                      # NOT "can cause"
+  ["insulin", "secreted_by", "pancreas"]                 # NOT "secreted from"
+  ["warfarin", "metabolized_by", "liver"]                # NOT "broken down by"
+  ["aspirin", "inhibits", "COX enzyme"]                  # NOT "blocks"
+  ["diabetes", "associated_with", "obesity"]             # NOT "linked to"
+
+❌ INCORRECT - Not normalized:
+  ["Metformin", "is", "medication"]                      # Should be "is_a"
+  ["Metformin", "is_used_to_treat", "diabetes"]         # Should be "treats"
+  ["Metformin", "can_cause", "nausea"]                  # Should be "causes"
+  ["insulin", "secreted_from", "pancreas"]              # Should be "secreted_by"
+  ["diabetes", "linked_to", "obesity"]                  # Should be "associated_with"
+
+=== SUMMARY ===
+
+1. Extract relationships from text naturally
+2. NORMALIZE to canonical forms using the guidelines above
+3. Keep relationship vocabulary controlled but not overly restrictive
+4. Expected result: ~40-60 unique relationship types (not 193+)
 
 """
 # Hướng dẫn: 

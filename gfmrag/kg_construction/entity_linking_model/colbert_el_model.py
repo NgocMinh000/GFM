@@ -20,6 +20,25 @@ from .base_model import BaseELModel
 logger = logging.getLogger(__name__)
 
 
+def _setup_hf_token():
+    """Load HF token from .env and set as environment variable."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        hf_token = os.getenv("HF_TOKEN")
+        if hf_token:
+            # Set token for transformers library
+            os.environ["HF_TOKEN"] = hf_token
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            logger.info("HF token loaded from .env")
+            return True
+        return False
+    except ImportError:
+        logger.debug("python-dotenv not installed, skipping token setup")
+        return False
+
+
 class ColbertELModel(BaseELModel):
     """
     Entity Linking model dùng ColBERT (Contextualized Late Interaction over BERT).
@@ -53,18 +72,30 @@ class ColbertELModel(BaseELModel):
     ) -> None:
         """
         Khởi tạo ColBERT model.
-        
+
         Args:
-            model_name_or_path: Path hoặc HF model name
+            model_name_or_path: HF model name hoặc path
                                Default: "colbert-ir/colbertv2.0"
+                               RAGatouille tự động cache model sau lần đầu download.
             root: Thư mục lưu index
             force: Xóa index cũ và tạo lại nếu True
+
+        Note:
+            RAGatouille tự động cache ColBERT models tại ~/.cache/huggingface/
+            Lần đầu sẽ download, các lần sau dùng cache.
         """
+        # Setup HF token from .env if available (cho private models hoặc rate limiting)
+        _setup_hf_token()
+
         self.model_name_or_path = model_name_or_path
         self.root = root
         self.force = force
-        
+
+        logger.info(f"Loading ColBERT model: {model_name_or_path}")
+        logger.info("(First run will download, then cache for reuse)")
+
         # Load pretrained ColBERT qua RAGatouille wrapper
+        # RAGatouille tự động cache model
         self.colbert_model = RAGPretrainedModel.from_pretrained(
             self.model_name_or_path,
             index_root=self.root,
@@ -73,39 +104,52 @@ class ColbertELModel(BaseELModel):
     def index(self, entity_list: list) -> None:
         """
         Index entities với ColBERT.
-        
+
         Workflow:
         1. Tạo fingerprint (MD5 hash) từ entity_list
         2. Check cache: Nếu index đã tồn tại và force=False → reuse
         3. Clean entities bằng processing_phrases()
-        4. Encode và lưu vào FAISS index
-        
+        4. Encode và lưu vào index (FAISS cho large datasets, plain cho small)
+
         Args:
             entity_list: Danh sách entities cần index
-        
+
         Notes:
             - Index name format: "Entity_index_{md5_hash}"
-            - Dùng FAISS cho fast similarity search
-            - split_documents=False: Mỗi entity là 1 document nguyên vẹn
+            - Auto-detect small datasets: disable FAISS if <15 entities
+            - FAISS requires ≥64 embeddings for clustering (64 clusters default)
+            - Small datasets use plain index (no clustering)
         """
         # Tạo unique index name từ MD5 hash
         fingerprint = hashlib.md5("".join(entity_list).encode()).hexdigest()
         index_name = f"Entity_index_{fingerprint}"
-        
+
         # Xóa index cũ nếu force=True
         if os.path.exists(f"{self.root}/colbert/{fingerprint}") and self.force:
             shutil.rmtree(f"{self.root}/colbert/{fingerprint}")
-        
+
         # Clean entities: lowercase, remove special chars
         phrases = [processing_phrases(p) for p in entity_list]
-        
+
+        # Auto-detect small datasets and disable FAISS to avoid clustering errors
+        # FAISS requires ≥64 training points for 64 clusters
+        # Estimate: ~6 tokens/entity → need ≥11 entities for 64 embeddings
+        # Use threshold of 15 entities to be safe
+        use_faiss = len(entity_list) >= 15
+
+        if not use_faiss:
+            logger.info(
+                f"Small dataset detected ({len(entity_list)} entities). "
+                f"Using plain index (no FAISS clustering) to avoid clustering errors."
+            )
+
         # Tạo ColBERT index
         index_path = self.colbert_model.index(
             index_name=index_name,
             collection=phrases,
             overwrite_index=self.force if self.force else "reuse",
             split_documents=False,  # Không split entities thành chunks
-            use_faiss=True,         # Dùng FAISS cho speed
+            use_faiss=use_faiss,    # Auto: True cho ≥15 entities, False cho <15
         )
         self.index_path = index_path
 
@@ -148,7 +192,11 @@ class ColbertELModel(BaseELModel):
         # Debug: Log raw result structure
         logger.debug(f"ColBERT search returned results type: {type(results)}")
         if results and len(results) > 0:
-            logger.debug(f"First result type: {type(results[0])}, Sample: {results[0][:2] if results[0] else 'Empty'}")
+            try:
+                sample = str(results[0])[:100] if results[0] else 'Empty'
+            except Exception:
+                sample = f"<{type(results[0]).__name__}>"
+            logger.debug(f"First result type: {type(results[0])}, Sample: {sample}")
 
         # Format kết quả
         linked_entity_dict: dict[str, list] = {}
@@ -163,13 +211,44 @@ class ColbertELModel(BaseELModel):
                 continue
 
             # Debug: Check raw result structure
-            logger.debug(f"Query '{query}' got {len(result)} results")
+            logger.debug(f"Query '{query}' result type: {type(result)}, length: {len(result) if hasattr(result, '__len__') else 'N/A'}")
             if result:
-                logger.debug(f"First result type: {type(result[0])}, content: {str(result[0])[:100]}")
+                try:
+                    # Handle both list and dict result formats
+                    if isinstance(result, (list, tuple)) and len(result) > 0:
+                        first_item = result[0]
+                        content_preview = str(first_item)[:100]
+                        logger.debug(f"First result type: {type(first_item)}, content: {content_preview}")
+                    elif isinstance(result, dict):
+                        content_preview = str(result)[:100]
+                        logger.debug(f"Result is dict with keys: {list(result.keys())[:5]}")
+                except Exception as e:
+                    logger.debug(f"Could not preview result: {e}")
 
             # Check if results are in expected format
             valid_results = []
-            for r in result:
+
+            # Handle different result container formats
+            # FAISS returns list of dicts, PLAID might return dict or other formats
+            result_items = []
+            if isinstance(result, (list, tuple)):
+                result_items = result
+            elif isinstance(result, dict):
+                # If result is a dict, it might be a single result or have nested structure
+                # Common format: {'content': [...], 'score': [...]}
+                if 'content' in result and 'score' in result:
+                    # Convert to list of dicts format
+                    contents = result['content'] if isinstance(result['content'], list) else [result['content']]
+                    scores = result['score'] if isinstance(result['score'], list) else [result['score']]
+                    result_items = [{'content': c, 'score': s} for c, s in zip(contents, scores)]
+                else:
+                    logger.warning(f"Unknown dict result format for query '{query}': keys={list(result.keys())}")
+                    continue
+            else:
+                logger.warning(f"Unexpected result container type for query '{query}': {type(result)}")
+                continue
+
+            for r in result_items:
                 # Handle different result formats from RAGatouille
                 if isinstance(r, dict):
                     # Expected format: dict with 'content' and 'score' keys
@@ -185,9 +264,18 @@ class ColbertELModel(BaseELModel):
                         logger.warning(f"Unexpected result format for query '{query}': keys={list(r.keys())}")
                 elif isinstance(r, str):
                     # If result is just a string, skip it with warning
-                    logger.warning(f"Got string result instead of dict for query '{query}': '{r[:50]}...'")
+                    try:
+                        preview = r[:50] if len(r) > 50 else r
+                    except Exception:
+                        preview = "<unable to preview>"
+                    logger.warning(f"Got string result instead of dict for query '{query}': '{preview}...'")
                 else:
-                    logger.warning(f"Unexpected result type for query '{query}': {type(r)}")
+                    # Handle any other unexpected types
+                    try:
+                        type_info = f"{type(r).__name__}: {str(r)[:50]}"
+                    except Exception:
+                        type_info = f"{type(r).__name__}"
+                    logger.warning(f"Unexpected result type for query '{query}': {type_info}")
 
             if not valid_results:
                 logger.warning(f"No valid results for query '{query}' after format validation. Total results: {len(result)}")
@@ -210,24 +298,23 @@ class ColbertELModel(BaseELModel):
 
     def compute_pairwise_similarity(self, entity1: str, entity2: str) -> float:
         """
-        Compute pairwise similarity between two entities using ColBERT.
+        Compute pairwise similarity between two entities using ColBERT MaxSim.
 
-        ⚠️  WARNING: This method will OVERWRITE the current index!
-        If you have already indexed a large collection, consider using the standalone
-        utility function instead:
+        FIXED: Direct embedding computation WITHOUT indexing/clustering.
+        This completely avoids FAISS clustering errors for small entity pairs.
 
-        >>> from gfmrag.kg_construction.entity_linking_model.colbert_utils import compute_colbert_pairwise_similarity
-        >>> score = compute_colbert_pairwise_similarity(searcher, entity1, entity2)
-
-        This method indexes entity2 and searches for entity1, returning the similarity score.
-        Useful for quick pairwise comparisons or evaluating entity resolution quality.
+        Algorithm:
+        1. Access ColBERT encoder directly from RAGatouille model
+        2. Encode both entities to get token-level embeddings
+        3. Compute MaxSim manually: sum of max similarities per query token
+        4. Average bidirectional scores for symmetry
 
         Args:
-            entity1: First entity string (query)
-            entity2: Second entity string (indexed as reference)
+            entity1: First entity string
+            entity2: Second entity string
 
         Returns:
-            float: Similarity score (0-1), or 0.0 if computation fails
+            float: Similarity score [0.0, 1.0], or 0.0 if computation fails
 
         Example:
             >>> model = ColbertELModel()
@@ -235,26 +322,81 @@ class ColbertELModel(BaseELModel):
             0.856
 
         Note:
-            - ColBERT similarity is asymmetric: sim(A, B) may differ from sim(B, A)
-            - This implementation uses entity1 as query, entity2 as document
-            - For batch pairwise computations, use batch_compute_colbert_similarity()
+            - No indexing required (avoids FAISS clustering completely)
+            - Direct ColBERT MaxSim computation
+            - Safe for any entity pair, including single pairs
         """
         try:
-            # Index the second entity
-            self.index([entity2])
+            import torch
 
-            # Search for the first entity
-            result_dict = self([entity1], topk=1)
+            # Clean entities
+            entity1_clean = processing_phrases(entity1)
+            entity2_clean = processing_phrases(entity2)
 
-            # Extract score
-            cleaned_entity1 = processing_phrases(entity1)
-            if cleaned_entity1 in result_dict and result_dict[cleaned_entity1]:
-                # Return the raw score (not normalized)
-                return result_dict[cleaned_entity1][0].get("score", 0.0)
-            else:
-                logger.warning(f"No results found for pairwise similarity: '{entity1}' vs '{entity2}'")
-                return 0.0
+            # Access underlying ColBERT Checkpoint from RAGatouille
+            # RAGatouille stores the Checkpoint in self.model.inference_ckpt
+            try:
+                checkpoint = self.colbert_model.model.inference_ckpt
+            except AttributeError:
+                # Fallback: try alternative attribute paths
+                try:
+                    checkpoint = self.colbert_model.rag.model.inference_ckpt
+                except AttributeError:
+                    logger.error("Cannot access ColBERT Checkpoint from RAGatouille")
+                    return 0.0
+
+            # Encode entities as queries to get token embeddings
+            # ColBERT Checkpoint's queryFromText returns embeddings for query tokens
+            with torch.no_grad():
+                # Encode entity1
+                emb1 = checkpoint.queryFromText([entity1_clean], bsize=1)
+                if isinstance(emb1, tuple):
+                    emb1 = emb1[0]  # Extract embeddings if returned as tuple
+                if len(emb1.shape) == 3:
+                    emb1 = emb1[0]  # Shape: [num_tokens, dim]
+
+                # Encode entity2
+                emb2 = checkpoint.queryFromText([entity2_clean], bsize=1)
+                if isinstance(emb2, tuple):
+                    emb2 = emb2[0]
+                if len(emb2.shape) == 3:
+                    emb2 = emb2[0]  # Shape: [num_tokens, dim]
+
+            # Compute ColBERT MaxSim scores
+            # MaxSim(Q, D) = Σ_i max_j(Q_i · D_j)
+            # For each token in query, find max similarity with all tokens in document
+
+            # Direction 1: entity1 as query → entity2 as document
+            similarity_matrix_1to2 = torch.matmul(emb1, emb2.T)  # [tokens1, tokens2]
+            maxsim_1to2 = similarity_matrix_1to2.max(dim=1).values.sum().item()
+
+            # Direction 2: entity2 as query → entity1 as document
+            similarity_matrix_2to1 = torch.matmul(emb2, emb1.T)  # [tokens2, tokens1]
+            maxsim_2to1 = similarity_matrix_2to1.max(dim=1).values.sum().item()
+
+            # Bidirectional average for symmetric similarity
+            avg_score = (maxsim_1to2 + maxsim_2to1) / 2.0
+
+            # Normalize by average number of tokens to get [0, 1] range
+            # ColBERT MaxSim scores scale with number of tokens
+            num_tokens_avg = (emb1.shape[0] + emb2.shape[0]) / 2.0
+            normalized_score = avg_score / num_tokens_avg if num_tokens_avg > 0 else 0.0
+
+            # Clip to [0, 1] range (though scores can theoretically exceed 1.0)
+            final_score = max(0.0, min(1.0, normalized_score))
+
+            logger.debug(
+                f"ColBERT similarity '{entity1}' ↔ '{entity2}': {final_score:.4f} "
+                f"(raw: 1→2={maxsim_1to2:.2f}, 2→1={maxsim_2to1:.2f}, "
+                f"tokens: {emb1.shape[0]}/{emb2.shape[0]})"
+            )
+
+            return final_score
 
         except Exception as e:
-            logger.error(f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}")
+            logger.error(
+                f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}"
+            )
+            import traceback
+            traceback.print_exc()
             return 0.0

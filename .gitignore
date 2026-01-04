@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -20,26 +22,45 @@ wheels/
 .installed.cfg
 *.egg
 
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
 # PyCharm
 .idea/
 
 # VS Code
 .vscode/
 
-# Jupyter
-.ipynb_checkpoints/
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# Environment
+# Environment variables
 .env
-.venv
-env/
-venv/
-ENV/
+.env.local
 
-# Cache
-.cache/
+# Outputs and temporary files
+outputs/
+tmp/
+logs/
 *.log
 
-# OS
+# OS specific
 .DS_Store
 Thumbs.db
+
+# Poetry
+poetry.lock
+
+# Model checkpoints and data
+*.pt
+*.pth
+*.ckpt
+data/
+checkpoints/
+wandb/
+
+# Downloaded models (too large for Git)
+models/

@@ -30,7 +30,7 @@ langchain-together = "^0.2.0"
 langchain-community = "^0.3.9"
 langchain-nvidia-ai-endpoints = "^0.3.9"
 faiss-gpu-cu12 = "^1.9.0.post1"
-ragatouille<0.0.10
+ragatouille = "<0.0.10"
 
 
 [tool.poetry.group.dev.dependencies]

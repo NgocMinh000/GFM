@@ -89,13 +89,19 @@ def main(cfg: DictConfig) -> None:
     kg_constructor = KGConstructor.from_config(cfg.kg_constructor)
     
     # ========================================================================
-    # BƯỚC 4: KHỞI TẠO QA CONSTRUCTOR
+    # BƯỚC 4: KHỞI TẠO QA CONSTRUCTOR (OPTIONAL)
     # ========================================================================
     # QAConstructor: Component tạo các cặp Question-Answer từ documents
     # - Sinh câu hỏi tự động từ nội dung
     # - Tạo câu trả lời tương ứng
     # - Dùng để augment (tăng cường) dữ liệu training hoặc evaluation
-    qa_constructor = QAConstructor.from_config(cfg.qa_constructor)
+    # NOTE: QA constructor is now optional - if not in config, it will be None
+    qa_constructor = None
+    if "qa_constructor" in cfg:
+        logger.info("QA constructor found in config - initializing...")
+        qa_constructor = QAConstructor.from_config(cfg.qa_constructor)
+    else:
+        logger.info("QA constructor not in config - skipping QA functionality")
 
     # ========================================================================
     # BƯỚC 5: INDEX DỮ LIỆU

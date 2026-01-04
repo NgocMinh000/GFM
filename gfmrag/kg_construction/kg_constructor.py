@@ -278,7 +278,7 @@ class KGConstructor(BaseKGConstructor):
         config = OmegaConf.to_container(cfg, resolve=True)
         if "force" in config:
             del config["force"]
-        if "force" in config["el_model"]:
+        if config.get("el_model") is not None and "force" in config["el_model"]:
             del config["el_model"]["force"]
         fingerprint = hashlib.md5(json.dumps(config).encode()).hexdigest()
 
@@ -293,7 +293,7 @@ class KGConstructor(BaseKGConstructor):
         return KGConstructor(
             root=base_tmp_dir,
             open_ie_model=instantiate(cfg.open_ie_model),
-            el_model=instantiate(cfg.el_model),
+            el_model=instantiate(cfg.el_model) if cfg.el_model is not None else None,
             num_processes=cfg.num_processes,
             cosine_sim_edges=cfg.cosine_sim_edges,
             threshold=cfg.threshold,
@@ -509,18 +509,22 @@ class KGConstructor(BaseKGConstructor):
                             unclean_triples.append(triple)
                             continue
 
-                        clean_triples.append(clean_triple)
-                        phrases.extend(clean_triple)
-
                         head_ent = clean_triple[0]
                         tail_ent = clean_triple[2]
 
+                        # STRICT VALIDATION: Skip triples without NER entities
+                        # Only keep triples where at least one entity is from NER
                         if (
                             head_ent not in ner_entities
                             and tail_ent not in ner_entities
                         ):
                             triples_wo_ner_entity.append(triple)
+                            unclean_triples.append(triple)
+                            continue  # SKIP this triple - don't add to graph
 
+                        # Only add to graph if validation passed
+                        clean_triples.append(clean_triple)
+                        phrases.extend(clean_triple)
                         graph[(head_ent, tail_ent)] = clean_triple[1]
 
                         for triple_entity in [clean_triple[0], clean_triple[2]]:

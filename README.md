@@ -4,7 +4,8 @@
 apt update
 apt install git -y
 
-git clone https://github.com/NgocMinh000/GFM.git
+git clone -b claude/integrate-yescale-llm-01Eij6gMg1uSwfaLizjNQ1ih \
+https://github.com/NgocMinh000/GFM.git
 # Cài miniconda
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh

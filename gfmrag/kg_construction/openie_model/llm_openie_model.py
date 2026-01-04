@@ -148,12 +148,20 @@ class LLMOPENIEModel(BaseOPENIEModel):
 
             # Extract entities từ JSON response
             if "named_entities" not in response_content:
+                logger.warning(
+                    f"NER response missing 'named_entities' field. "
+                    f"Response: {response_content}. "
+                    f"Text preview: {text[:100]}..."
+                )
                 response_content = []
             else:
                 response_content = response_content["named_entities"]
 
         except Exception as e:
-            logger.error(f"Error in extracting named entities: {e}")
+            logger.error(
+                f"Error in extracting named entities: {e}. "
+                f"Text preview: {text[:100]}..."
+            )
             response_content = []
 
         return response_content
@@ -293,7 +301,8 @@ class LLMOPENIEModel(BaseOPENIEModel):
         # Warning nếu không extract được entities
         if not doc_entities:
             logger.warning(
-                "No entities extracted. Possibly model not following instructions"
+                f"No entities extracted. Possibly model not following instructions. "
+                f"Text preview: {text[:200]}..."
             )
         
         # ================================================================
