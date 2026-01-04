@@ -35,6 +35,7 @@ from .metrics import (
     Stage6Metrics,
 )
 from .validation import Stage1Validator
+from .visualization import PipelineVisualizer, visualize_pipeline_metrics
 
 __all__ = [
     "UMLSMappingConfig",
@@ -59,6 +60,8 @@ __all__ = [
     "Stage5Metrics",
     "Stage6Metrics",
     "Stage1Validator",
+    "PipelineVisualizer",
+    "visualize_pipeline_metrics",
 ]
 
 __version__ = "1.0.0"

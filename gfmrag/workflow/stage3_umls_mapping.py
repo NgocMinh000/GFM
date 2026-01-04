@@ -244,9 +244,26 @@ class Stage3UMLSMapping:
         # Save all metrics
         self.metrics.save_metrics()
 
+        # Generate visualizations
+        logger.info("\nGenerating visualization plots...")
+        try:
+            from gfmrag.umls_mapping.visualization import visualize_pipeline_metrics
+            visualize_pipeline_metrics(self.output_dir)
+            logger.info("✓ Visualizations generated successfully")
+        except ImportError:
+            logger.warning("Matplotlib/Seaborn not installed. Skipping visualization.")
+            logger.warning("Install with: pip install matplotlib seaborn")
+        except Exception as e:
+            logger.warning(f"Failed to generate visualizations: {e}")
+
         logger.info("\n" + "=" * 80)
         logger.info("Stage 3 Complete!")
         logger.info("=" * 80)
+        logger.info(f"\nOutput files:")
+        logger.info(f"  - Mappings: {self.output_dir / 'final_umls_mappings.json'}")
+        logger.info(f"  - Metrics: {self.output_dir / 'pipeline_metrics.json'}")
+        logger.info(f"  - Report: {self.output_dir / 'pipeline_report.txt'}")
+        logger.info(f"  - Visualizations: {self.output_dir / 'visualizations/'}")
 
         return final_mappings
 

@@ -218,6 +218,10 @@ class KGConstructor(BaseKGConstructor):
         self.force = force
         self.data_name = None
 
+        # Initialize metrics collector
+        from .metrics import EntityResolutionMetrics
+        self.metrics = EntityResolutionMetrics()
+
     @property
     def tmp_dir(self) -> str:
         """
@@ -316,6 +320,9 @@ class KGConstructor(BaseKGConstructor):
         Note:
             If self.force is True, it will clear all temporary files before processing.
         """
+        # Start overall timer
+        self.metrics.start_timer("total")
+
         # Get dataset information
         self.data_name = data_name  # type: ignore
         raw_path = os.path.join(data_root, data_name, "raw")
@@ -328,6 +335,27 @@ class KGConstructor(BaseKGConstructor):
         open_ie_result_path = self.open_ie_extraction(raw_path)
         graph = self.create_graph(open_ie_result_path)
         extracted_triples = [(h, r, t) for (h, t), r in graph.items()]
+
+        # Stop overall timer
+        self.metrics.stop_timer("total")
+
+        # Save metrics and generate visualizations
+        logger.info("\n" + "=" * 80)
+        logger.info("Saving entity resolution metrics...")
+        self.metrics.save_metrics(self.tmp_dir)
+
+        # Generate visualizations
+        logger.info("\nGenerating visualizations...")
+        try:
+            from .visualization import visualize_entity_resolution
+            visualize_entity_resolution(self.tmp_dir)
+        except ImportError:
+            logger.warning("Matplotlib/Seaborn not installed. Skipping visualizations.")
+        except Exception as e:
+            logger.warning(f"Failed to generate visualizations: {e}")
+
+        logger.info("=" * 80 + "\n")
+
         return extracted_triples
 
     def get_document2entities(self, data_root: str, data_name: str) -> dict:
@@ -371,6 +399,9 @@ class KGConstructor(BaseKGConstructor):
         Returns:
             str: Path to the openie results
         """
+        # Start OpenIE timer
+        self.metrics.start_timer("openie")
+
         # Read data corpus
         with open(os.path.join(raw_path, "dataset_corpus.json")) as f:
             corpus = json.load(f)
@@ -414,6 +445,10 @@ class KGConstructor(BaseKGConstructor):
                             f.flush()
 
         logger.info(f"OpenIE results saved to {open_ie_result_path}")
+
+        # Stop OpenIE timer
+        self.metrics.stop_timer("openie")
+
         return open_ie_result_path
 
     def create_graph(self, open_ie_result_path: str) -> dict:
@@ -429,6 +464,8 @@ class KGConstructor(BaseKGConstructor):
                 - key: (head, tail)
                 - value: relation
         """
+        # Start graph creation timer
+        self.metrics.start_timer("graph_creation")
 
         with open(open_ie_result_path) as f:
             extracted_triples = [json.loads(line) for line in f]
@@ -546,6 +583,36 @@ class KGConstructor(BaseKGConstructor):
 
         logger.info("\n%s", pd.DataFrame(stat_df).set_index(0))
 
+        # Record metrics
+        total_triples = sum(len(row["extracted_triples"]) for row in extracted_triples)
+        self.metrics.record_openie_stats(
+            total_passages=len(extracted_triples),
+            total_triples=total_triples,
+            clean_triples=len(lose_facts),
+            incorrectly_formatted=len(incorrectly_formatted_triples),
+            triples_without_ner=len(triples_wo_ner_entity),
+            unique_triples=len(lose_fact_dict),
+        )
+
+        self.metrics.record_entity_stats(
+            total_phrases=len(phrases),
+            unique_phrases=len(unique_phrases),
+            total_entities=len(entities),
+            unique_entities=len(np.unique(entities)),
+        )
+
+        self.metrics.record_graph_stats(
+            total_edges=len(graph),
+            synonymy_edges=len(synonymy_edges),
+            unique_relations=len(unique_relations),
+        )
+
+        # Analyze clusters
+        self.metrics.analyze_clusters(graph)
+
+        # Stop graph creation timer
+        self.metrics.stop_timer("graph_creation")
+
         return graph
 
     def augment_graph(self, graph: dict[Any, Any], kb_phrase_dict: dict) -> None:
@@ -571,6 +638,9 @@ class KGConstructor(BaseKGConstructor):
         """
         logger.info("Augmenting graph from similarity")
 
+        # Start entity linking timer
+        self.metrics.start_timer("entity_linking")
+
         unique_phrases = list(kb_phrase_dict.keys())
 
         # Create mapping: processed_phrase -> original_phrase
@@ -585,6 +655,7 @@ class KGConstructor(BaseKGConstructor):
         # Skip entity linking if no valid entities
         if not processed_phrases:
             logger.warning("No valid entities to index for entity linking. Skipping augmentation.")
+            self.metrics.stop_timer("entity_linking")
             return
 
         self.el_model.index(processed_phrases)
@@ -593,6 +664,8 @@ class KGConstructor(BaseKGConstructor):
         sim_neighbors = self.el_model(processed_phrases, topk=self.max_sim_neighbors)
 
         logger.info("Adding synonymy edges")
+        total_synonym_pairs = 0
+        all_synonym_pairs = []  # For metrics tracking
         for processed_phrase, neighbors in tqdm(sim_neighbors.items()):
             synonyms = []  # [(phrase_id, score)]
             if len(re.sub("[^A-Za-z0-9]", "", processed_phrase)) > 2:
@@ -620,3 +693,22 @@ class KGConstructor(BaseKGConstructor):
                                 synonyms.append((original_neighbor, n_score))
                                 graph[(original_phrase, original_neighbor)] = "equivalent"
                                 num_nns += 1
+                                total_synonym_pairs += 1
+                                # Record for metrics
+                                all_synonym_pairs.append((original_phrase, original_neighbor, n_score))
+
+                    # Log synonym pairs found for this entity (for debugging)
+                    if synonyms:
+                        logger.debug(f"Entity '{original_phrase}' -> Found {len(synonyms)} synonyms: {synonyms}")
+
+        logger.info(f"Added {total_synonym_pairs} synonym pairs in total")
+
+        # Record entity linking metrics
+        self.metrics.record_entity_linking(
+            entities_indexed=len(processed_phrases),
+            synonym_pairs=all_synonym_pairs,
+            threshold=self.threshold,
+        )
+
+        # Stop entity linking timer
+        self.metrics.stop_timer("entity_linking")
