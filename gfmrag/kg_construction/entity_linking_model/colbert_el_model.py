@@ -293,30 +293,30 @@ class ColbertELModel(BaseELModel):
             entity1_clean = processing_phrases(entity1)
             entity2_clean = processing_phrases(entity2)
 
-            # Access underlying ColBERT model from RAGatouille
-            # RAGatouille stores the ColBERT model in self.model attribute
+            # Access underlying ColBERT Checkpoint from RAGatouille
+            # RAGatouille stores the Checkpoint in self.model.inference_ckpt
             try:
-                colbert_model = self.colbert_model.model
+                checkpoint = self.colbert_model.model.inference_ckpt
             except AttributeError:
                 # Fallback: try alternative attribute paths
                 try:
-                    colbert_model = self.colbert_model.rag.model
+                    checkpoint = self.colbert_model.rag.model.inference_ckpt
                 except AttributeError:
-                    logger.error("Cannot access ColBERT model from RAGatouille")
+                    logger.error("Cannot access ColBERT Checkpoint from RAGatouille")
                     return 0.0
 
             # Encode entities as queries to get token embeddings
-            # ColBERT's queryFromText returns embeddings for query tokens
+            # ColBERT Checkpoint's queryFromText returns embeddings for query tokens
             with torch.no_grad():
                 # Encode entity1
-                emb1 = colbert_model.queryFromText([entity1_clean], bsize=1)
+                emb1 = checkpoint.queryFromText([entity1_clean], bsize=1)
                 if isinstance(emb1, tuple):
                     emb1 = emb1[0]  # Extract embeddings if returned as tuple
                 if len(emb1.shape) == 3:
                     emb1 = emb1[0]  # Shape: [num_tokens, dim]
 
                 # Encode entity2
-                emb2 = colbert_model.queryFromText([entity2_clean], bsize=1)
+                emb2 = checkpoint.queryFromText([entity2_clean], bsize=1)
                 if isinstance(emb2, tuple):
                     emb2 = emb2[0]
                 if len(emb2.shape) == 3:
