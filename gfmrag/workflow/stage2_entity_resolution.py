@@ -2119,6 +2119,18 @@ def main(cfg: DictConfig) -> None:
 
     logger.info("\n✅ Stage 2 completed successfully!")
 
+    # Generate visualizations
+    logger.info("\nGenerating visualization plots...")
+    try:
+        from gfmrag.workflow.stage2_visualization import visualize_stage2_metrics
+        visualize_stage2_metrics(Path(config.output_dir))
+        logger.info("✓ Visualizations generated successfully")
+    except ImportError:
+        logger.warning("Matplotlib/Seaborn not installed. Skipping visualization.")
+        logger.warning("Install with: pip install matplotlib seaborn")
+    except Exception as e:
+        logger.warning(f"Failed to generate visualizations: {e}")
+
 
 if __name__ == "__main__":
     main()
