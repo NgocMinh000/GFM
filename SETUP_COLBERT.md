@@ -11,6 +11,33 @@ ColBERT model cần tải từ HuggingFace (~450MB), nhưng:
 
 **Tải model về local một lần, sau đó code tự động dùng local model.**
 
+## Về HuggingFace Token
+
+### ❓ Tôi có HF_TOKEN trong .env, có giúp gì không?
+
+**TL;DR:** HF token **KHÔNG giải quyết** lỗi proxy/network.
+
+### Khi nào cần HF token:
+
+✅ **Private models** - Models riêng tư
+✅ **Gated models** - Models yêu cầu chấp nhận terms
+✅ **Rate limiting** - Tăng giới hạn download
+
+### Khi nào KHÔNG cần HF token:
+
+❌ **Public models** - `colbert-ir/colbertv2.0` là public
+❌ **Lỗi proxy** - Token không giải quyết "403 Tunnel connection failed"
+❌ **Network issues** - Token chỉ cho authentication, không fix network
+
+### Code đã hỗ trợ HF token:
+
+Nếu có token trong `.env`:
+```bash
+HF_TOKEN=hf_your_token_here
+```
+
+Code tự động dùng token khi download (nhưng không giải quyết proxy issue).
+
 ## Cách thực hiện
 
 ### Bước 1: Tải model về local

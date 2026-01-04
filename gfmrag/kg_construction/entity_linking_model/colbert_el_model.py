@@ -20,6 +20,25 @@ from .base_model import BaseELModel
 logger = logging.getLogger(__name__)
 
 
+def _setup_hf_token():
+    """Load HF token from .env and set as environment variable."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        hf_token = os.getenv("HF_TOKEN")
+        if hf_token:
+            # Set token for transformers library
+            os.environ["HF_TOKEN"] = hf_token
+            os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            logger.info("HF token loaded from .env")
+            return True
+        return False
+    except ImportError:
+        logger.debug("python-dotenv not installed, skipping token setup")
+        return False
+
+
 class ColbertELModel(BaseELModel):
     """
     Entity Linking model dùng ColBERT (Contextualized Late Interaction over BERT).
@@ -62,6 +81,9 @@ class ColbertELModel(BaseELModel):
             root: Thư mục lưu index
             force: Xóa index cũ và tạo lại nếu True
         """
+        # Setup HF token from .env if available (cho private models hoặc rate limiting)
+        _setup_hf_token()
+
         # Ưu tiên dùng local model nếu có (tránh download từ HuggingFace)
         local_model_path = "models/colbert/colbertv2.0"
         if os.path.exists(local_model_path) and model_name_or_path == "colbert-ir/colbertv2.0":

@@ -22,6 +22,20 @@ def download_colbert_model():
     print("=" * 80)
     print()
 
+    # Load HF token from .env if available
+    hf_token = None
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        hf_token = os.getenv("HF_TOKEN")
+        if hf_token:
+            print(f"🔑 Using HF token from .env: {hf_token[:10]}...")
+        else:
+            print("ℹ️  No HF token found (not needed for public models)")
+    except ImportError:
+        print("ℹ️  python-dotenv not installed, skipping token check")
+    print()
+
     # Định nghĩa paths
     models_dir = Path("models/colbert")
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -41,6 +55,7 @@ def download_colbert_model():
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             cache_dir=None,
+            token=hf_token,  # Use token if available
         )
         tokenizer.save_pretrained(local_path)
         print(f"   ✅ Saved to {local_path}")
@@ -50,6 +65,7 @@ def download_colbert_model():
         model = AutoModel.from_pretrained(
             model_name,
             cache_dir=None,
+            token=hf_token,  # Use token if available
         )
         model.save_pretrained(local_path)
         print(f"   ✅ Saved to {local_path}")
