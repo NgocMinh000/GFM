@@ -227,24 +227,22 @@ class ColbertELModel(BaseELModel):
 
     def compute_pairwise_similarity(self, entity1: str, entity2: str) -> float:
         """
-        Compute pairwise similarity between two entities using ColBERT.
+        Compute pairwise similarity between two entities using ColBERT MaxSim.
 
-        ⚠️  WARNING: This method will OVERWRITE the current index!
-        If you have already indexed a large collection, consider using the standalone
-        utility function instead:
+        IMPROVED: Direct embedding computation without indexing.
+        This avoids FAISS clustering errors when dealing with single entities.
 
-        >>> from gfmrag.kg_construction.entity_linking_model.colbert_utils import compute_colbert_pairwise_similarity
-        >>> score = compute_colbert_pairwise_similarity(searcher, entity1, entity2)
-
-        This method indexes entity2 and searches for entity1, returning the similarity score.
-        Useful for quick pairwise comparisons or evaluating entity resolution quality.
+        Algorithm:
+        1. Encode both entities to token-level embeddings
+        2. Compute MaxSim: For each query token, find max similarity with doc tokens
+        3. Average bidirectional scores: (sim(e1→e2) + sim(e2→e1)) / 2
 
         Args:
-            entity1: First entity string (query)
-            entity2: Second entity string (indexed as reference)
+            entity1: First entity string
+            entity2: Second entity string
 
         Returns:
-            float: Similarity score (0-1), or 0.0 if computation fails
+            float: Similarity score [0.0, 1.0], or 0.0 if computation fails
 
         Example:
             >>> model = ColbertELModel()
@@ -252,26 +250,84 @@ class ColbertELModel(BaseELModel):
             0.856
 
         Note:
-            - ColBERT similarity is asymmetric: sim(A, B) may differ from sim(B, A)
-            - This implementation uses entity1 as query, entity2 as document
-            - For batch pairwise computations, use batch_compute_colbert_similarity()
+            - Uses direct MaxSim computation, no indexing required
+            - Bidirectional similarity for symmetry
+            - Safe for single entity pairs
         """
         try:
-            # Index the second entity
-            self.index([entity2])
+            import torch
+            import torch.nn.functional as F
 
-            # Search for the first entity
-            result_dict = self([entity1], topk=1)
+            # Clean entities
+            entity1_clean = processing_phrases(entity1)
+            entity2_clean = processing_phrases(entity2)
 
-            # Extract score
-            cleaned_entity1 = processing_phrases(entity1)
-            if cleaned_entity1 in result_dict and result_dict[cleaned_entity1]:
-                # Return the raw score (not normalized)
-                return result_dict[cleaned_entity1][0].get("score", 0.0)
+            # Get ColBERT encoder from RAGatouille model
+            # Access underlying ColBERT model
+            if hasattr(self.colbert_model, 'model'):
+                # RAGatouille wraps ColBERT model
+                colbert = self.colbert_model.model
+                if hasattr(colbert, 'model'):
+                    # Get actual ColBERT checkpoint
+                    checkpoint = colbert.model
+                else:
+                    checkpoint = colbert
             else:
-                logger.warning(f"No results found for pairwise similarity: '{entity1}' vs '{entity2}'")
+                logger.error("Cannot access ColBERT encoder from RAGatouille model")
                 return 0.0
+
+            # Encode entities to embeddings
+            # ColBERT queryFromText and docFromText methods
+            with torch.no_grad():
+                # Encode entity1 as query
+                query_emb = checkpoint.queryFromText([entity1_clean], bsize=1)[0]  # (num_tokens, dim)
+
+                # Encode entity2 as document
+                doc_emb = checkpoint.docFromText([entity2_clean], bsize=1)[0]  # (num_tokens, dim)
+
+                # Compute MaxSim: entity1 → entity2
+                # For each query token, find max similarity with all doc tokens
+                scores_1to2 = []
+                for q_token in query_emb:
+                    # Cosine similarity with all doc tokens
+                    sims = F.cosine_similarity(
+                        q_token.unsqueeze(0),  # (1, dim)
+                        doc_emb,               # (num_doc_tokens, dim)
+                        dim=1
+                    )
+                    # Take max
+                    max_sim = sims.max().item()
+                    scores_1to2.append(max_sim)
+
+                # Average over all query tokens
+                score_1to2 = sum(scores_1to2) / len(scores_1to2) if scores_1to2 else 0.0
+
+                # Compute MaxSim: entity2 → entity1 (reverse direction)
+                scores_2to1 = []
+                for q_token in doc_emb:
+                    sims = F.cosine_similarity(
+                        q_token.unsqueeze(0),
+                        query_emb,
+                        dim=1
+                    )
+                    max_sim = sims.max().item()
+                    scores_2to1.append(max_sim)
+
+                score_2to1 = sum(scores_2to1) / len(scores_2to1) if scores_2to1 else 0.0
+
+                # Bidirectional average for symmetry
+                final_score = (score_1to2 + score_2to1) / 2.0
+
+                # Normalize to [0, 1] range
+                final_score = max(0.0, min(1.0, final_score))
+
+                logger.debug(f"ColBERT similarity '{entity1}' ↔ '{entity2}': {final_score:.4f} "
+                           f"(1→2: {score_1to2:.4f}, 2→1: {score_2to1:.4f})")
+
+                return final_score
 
         except Exception as e:
             logger.error(f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}")
+            import traceback
+            traceback.print_exc()
             return 0.0
