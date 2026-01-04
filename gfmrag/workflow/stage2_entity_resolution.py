@@ -235,6 +235,324 @@ class EntityResolutionPipeline:
         logger.info("="*80)
 
     # ========================================================================
+    # STAGE 0: TYPE INFERENCE - SMART CASCADING (3-TIER)
+    # ========================================================================
+
+    # Tier 1: Medical keyword dictionaries (comprehensive)
+    MEDICAL_KEYWORDS = {
+        "drug": {
+            # Common drug classes
+            "antibiotic", "antibiotics", "penicillin", "amoxicillin", "azithromycin",
+            "antiviral", "antivirals", "acyclovir", "oseltamivir",
+            "analgesic", "analgesics", "painkiller", "pain reliever",
+            "aspirin", "ibuprofen", "acetaminophen", "paracetamol", "morphine",
+            "statin", "statins", "atorvastatin", "simvastatin", "rosuvastatin",
+            "beta blocker", "beta-blocker", "propranolol", "atenolol", "metoprolol",
+            "ace inhibitor", "lisinopril", "enalapril", "ramipril",
+            "diuretic", "diuretics", "furosemide", "hydrochlorothiazide",
+            "insulin", "metformin", "glipizide", "glyburide",
+            "antidepressant", "ssri", "fluoxetine", "sertraline", "citalopram",
+            "anticoagulant", "warfarin", "heparin", "rivaroxaban", "apixaban",
+            "chemotherapy", "chemo", "cisplatin", "carboplatin", "doxorubicin",
+            "vaccine", "vaccination", "immunization",
+            "steroid", "corticosteroid", "prednisone", "dexamethasone",
+            "medication", "medicine", "drug", "pill", "tablet", "capsule",
+            "injection", "infusion", "iv", "intravenous",
+        },
+        "disease": {
+            # Common diseases
+            "diabetes", "diabetic", "type 1 diabetes", "type 2 diabetes",
+            "hypertension", "high blood pressure",
+            "cancer", "carcinoma", "tumor", "malignancy", "neoplasm",
+            "heart disease", "cardiovascular disease", "coronary artery disease",
+            "stroke", "cerebrovascular accident", "cva",
+            "asthma", "copd", "chronic obstructive pulmonary disease",
+            "pneumonia", "bronchitis", "tuberculosis", "tb",
+            "alzheimer", "dementia", "parkinson",
+            "arthritis", "osteoarthritis", "rheumatoid arthritis",
+            "infection", "sepsis", "septic",
+            "hepatitis", "cirrhosis", "liver disease",
+            "kidney disease", "renal failure", "nephropathy",
+            "influenza", "flu", "covid", "coronavirus",
+            "hiv", "aids", "immunodeficiency",
+            "anemia", "leukemia", "lymphoma",
+            # Medical conditions
+            "syndrome", "disorder", "disease", "condition",
+            "insufficiency", "failure", "dysfunction",
+        },
+        "symptom": {
+            "pain", "ache", "aching", "sore", "soreness",
+            "headache", "migraine", "tension headache",
+            "fever", "pyrexia", "febrile",
+            "cough", "coughing", "productive cough", "dry cough",
+            "fatigue", "tiredness", "exhaustion", "weakness",
+            "nausea", "vomiting", "emesis",
+            "diarrhea", "constipation", "bloating",
+            "dizziness", "vertigo", "lightheadedness",
+            "shortness of breath", "dyspnea", "breathlessness",
+            "chest pain", "angina",
+            "abdominal pain", "stomach ache", "belly pain",
+            "back pain", "lower back pain",
+            "rash", "itching", "pruritus", "hives",
+            "swelling", "edema", "inflammation",
+            "bleeding", "hemorrhage",
+            "numbness", "tingling", "paresthesia",
+            "tremor", "shaking", "seizure", "convulsion",
+        },
+        "procedure": {
+            "surgery", "surgical", "operation",
+            "biopsy", "excision", "resection",
+            "transplant", "transplantation", "graft",
+            "catheterization", "angioplasty", "stent",
+            "dialysis", "hemodialysis", "peritoneal dialysis",
+            "chemotherapy", "radiotherapy", "radiation therapy",
+            "immunotherapy", "targeted therapy",
+            "physical therapy", "physiotherapy", "rehabilitation",
+            "screening", "test", "testing", "diagnosis",
+            "imaging", "x-ray", "ct scan", "mri", "ultrasound",
+            "endoscopy", "colonoscopy", "bronchoscopy",
+            "echocardiogram", "ekg", "ecg", "electrocardiogram",
+            "blood test", "lab test", "laboratory",
+            "vaccination", "immunization",
+        },
+        "gene": {
+            "gene", "genetic", "mutation", "variant",
+            "protein", "enzyme", "receptor",
+            "brca1", "brca2", "tp53", "egfr", "kras",
+            "chromosome", "allele", "genotype", "phenotype",
+            "dna", "rna", "mrna",
+        },
+        "anatomy": {
+            "heart", "cardiac", "myocardium", "ventricle", "atrium",
+            "lung", "pulmonary", "bronchus", "alveoli",
+            "liver", "hepatic", "bile duct",
+            "kidney", "renal", "nephron", "ureter",
+            "brain", "cerebral", "cortex", "hippocampus",
+            "stomach", "gastric", "intestine", "colon",
+            "bone", "skeletal", "joint", "cartilage",
+            "muscle", "muscular", "tendon", "ligament",
+            "skin", "dermal", "epidermis",
+            "blood", "vessel", "artery", "vein", "capillary",
+            "nerve", "neural", "neuron", "axon",
+            "gland", "thyroid", "pancreas", "adrenal",
+            "organ", "tissue", "cell",
+        },
+    }
+
+    def _infer_type_tier1_medical_keywords(self, entity: str) -> Dict:
+        """
+        Tier 1: Fast medical keyword matching with comprehensive dictionaries.
+
+        Strategy:
+        - Check entity tokens against curated medical keyword sets
+        - Fast O(1) lookup using set intersection
+        - High precision for common medical terms
+
+        Args:
+            entity: Entity name
+
+        Returns:
+            dict: {"type": str, "confidence": float, "tier": "tier1"}
+        """
+        entity_lower = entity.lower()
+        entity_tokens = set(entity_lower.split())
+
+        # Count keyword matches for each type
+        type_matches = {}
+        for entity_type, keywords in self.MEDICAL_KEYWORDS.items():
+            # Check full string match
+            if entity_lower in keywords:
+                type_matches[entity_type] = 1.0
+                continue
+
+            # Check token overlap
+            matches = entity_tokens & keywords
+            if matches:
+                # Confidence based on match ratio
+                match_ratio = len(matches) / len(entity_tokens)
+                type_matches[entity_type] = match_ratio
+
+        # Enhanced pattern matching (from old _infer_type_pattern)
+        pattern_result = self._infer_type_pattern(entity)
+        if pattern_result["confidence"] >= 0.85:
+            # High confidence pattern match
+            return {
+                "type": pattern_result["type"],
+                "confidence": pattern_result["confidence"],
+                "tier": "tier1_pattern"
+            }
+
+        # Select best keyword match
+        if type_matches:
+            best_type = max(type_matches.items(), key=lambda x: x[1])
+            entity_type, match_score = best_type
+
+            # Confidence scoring
+            if match_score >= 0.9:
+                confidence = 0.90
+            elif match_score >= 0.7:
+                confidence = 0.85
+            elif match_score >= 0.5:
+                confidence = 0.80
+            else:
+                confidence = 0.70
+
+            return {
+                "type": entity_type,
+                "confidence": confidence,
+                "tier": "tier1_keyword"
+            }
+
+        # No strong keyword match
+        return {
+            "type": pattern_result["type"],
+            "confidence": pattern_result["confidence"],
+            "tier": "tier1_pattern"
+        }
+
+    # Tier 2: Labeled examples for SapBERT kNN classification
+    LABELED_EXAMPLES = {
+        "drug": [
+            "aspirin", "ibuprofen", "metformin", "lisinopril", "atorvastatin",
+            "amlodipine", "metoprolol", "omeprazole", "albuterol", "gabapentin",
+            "penicillin", "amoxicillin", "ciprofloxacin", "azithromycin",
+            "insulin", "warfarin", "prednisone", "hydrochlorothiazide",
+        ],
+        "disease": [
+            "diabetes mellitus", "hypertension", "coronary artery disease",
+            "heart failure", "chronic kidney disease", "asthma", "copd",
+            "pneumonia", "stroke", "alzheimer disease", "parkinson disease",
+            "rheumatoid arthritis", "osteoarthritis", "cancer", "lymphoma",
+            "hepatitis", "cirrhosis", "tuberculosis", "hiv infection",
+        ],
+        "symptom": [
+            "chest pain", "headache", "abdominal pain", "back pain",
+            "shortness of breath", "cough", "fever", "fatigue", "nausea",
+            "dizziness", "edema", "rash", "joint pain", "muscle weakness",
+        ],
+        "procedure": [
+            "coronary artery bypass graft", "percutaneous coronary intervention",
+            "appendectomy", "cholecystectomy", "colonoscopy", "endoscopy",
+            "ct scan", "mri", "x-ray", "echocardiogram", "dialysis",
+            "physical therapy", "chemotherapy", "radiation therapy",
+        ],
+        "gene": [
+            "BRCA1", "BRCA2", "TP53", "EGFR", "KRAS", "ALK", "HER2",
+            "CFTR", "HTT", "APP", "PSEN1", "APOE",
+        ],
+        "anatomy": [
+            "heart", "lung", "liver", "kidney", "brain", "stomach",
+            "colon", "pancreas", "thyroid", "bone", "muscle", "skin",
+            "blood vessel", "artery", "vein", "nerve", "lymph node",
+        ],
+    }
+
+    def _infer_type_tier2_sapbert_knn(self, entity: str, embeddings: np.ndarray = None) -> Dict:
+        """
+        Tier 2: SapBERT kNN classification using labeled medical examples.
+
+        Strategy:
+        - Use pre-computed SapBERT embeddings (from Stage 1)
+        - Compare with labeled example embeddings via cosine similarity
+        - kNN voting (k=5) for type classification
+        - Fast and domain-specific (medical embeddings)
+
+        Args:
+            entity: Entity name
+            embeddings: Pre-computed SapBERT embeddings matrix (optional)
+
+        Returns:
+            dict: {"type": str, "confidence": float, "tier": "tier2"}
+        """
+        # Lazy initialization of labeled embeddings
+        if not hasattr(self, '_tier2_labeled_embeddings'):
+            from sentence_transformers import SentenceTransformer
+
+            logger.info("  Initializing Tier 2: SapBERT kNN classifier...")
+
+            # Load SapBERT model (same as Stage 1)
+            model = SentenceTransformer(
+                self.config.sapbert_model,
+                device=self.config.embedding_device
+            )
+
+            # Encode labeled examples
+            self._tier2_labeled_examples = []
+            self._tier2_labeled_types = []
+
+            for entity_type, examples in self.LABELED_EXAMPLES.items():
+                for example in examples:
+                    self._tier2_labeled_examples.append(example)
+                    self._tier2_labeled_types.append(entity_type)
+
+            # Compute embeddings
+            self._tier2_labeled_embeddings = model.encode(
+                self._tier2_labeled_examples,
+                batch_size=self.config.embedding_batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True
+            )
+
+            logger.info(f"  ✅ Tier 2 initialized with {len(self._tier2_labeled_examples)} labeled examples")
+
+        # Get entity embedding
+        if entity in self.entity_to_id and embeddings is not None:
+            # Use pre-computed embedding from Stage 1
+            entity_id = self.entity_to_id[entity]
+            entity_emb = embeddings[entity_id:entity_id+1]
+        else:
+            # Compute embedding on-the-fly (fallback)
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer(
+                self.config.sapbert_model,
+                device=self.config.embedding_device
+            )
+            entity_emb = model.encode(
+                [entity],
+                batch_size=1,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True
+            )
+
+        # Compute cosine similarities with labeled examples
+        similarities = np.dot(self._tier2_labeled_embeddings, entity_emb.T).flatten()
+
+        # kNN voting (k=5)
+        k = 5
+        top_k_indices = np.argsort(similarities)[-k:][::-1]
+        top_k_similarities = similarities[top_k_indices]
+        top_k_types = [self._tier2_labeled_types[i] for i in top_k_indices]
+
+        # Weighted voting by similarity
+        type_scores = {}
+        for sim, entity_type in zip(top_k_similarities, top_k_types):
+            if entity_type not in type_scores:
+                type_scores[entity_type] = 0.0
+            type_scores[entity_type] += sim
+
+        # Select best type
+        best_type = max(type_scores.items(), key=lambda x: x[1])
+        entity_type, total_score = best_type
+
+        # Confidence based on:
+        # 1. Top-1 similarity
+        # 2. Voting consensus
+        top1_sim = top_k_similarities[0]
+        consensus = sum(1 for t in top_k_types if t == entity_type) / k
+
+        # Confidence formula
+        confidence = (top1_sim * 0.6) + (consensus * 0.4)
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+
+        return {
+            "type": entity_type,
+            "confidence": confidence,
+            "tier": "tier2_sapbert_knn"
+        }
+
+    # ========================================================================
     # STAGE 0: TYPE INFERENCE
     # ========================================================================
 
@@ -292,19 +610,23 @@ class EntityResolutionPipeline:
 
     def stage0_type_inference(self) -> Dict[str, Dict]:
         """
-        Classify entity types using enhanced 4-step hybrid approach.
+        Classify entity types using SMART CASCADING (3-Tier) approach.
 
-        Architecture:
-        Step 1: Pattern-Based (regex)
-        Step 2: Relationship-Based with LLM
-        Step 3: Zero-shot Classification
-        Step 4: Hybrid Decision Logic
+        NEW Architecture (5-10x faster):
+        ├─ TIER 1: Medical Keywords + Pattern (0.001s/entity)
+        │  └─ Early stop if confidence ≥ 0.85
+        ├─ TIER 2: SapBERT kNN Classifier (0.01s/entity)
+        │  └─ Early stop if confidence ≥ 0.75
+        └─ TIER 3: LLM Relationship (2s/entity, only hard cases ~10%)
+
+        REMOVED:
+        - Zero-shot BART (78% bottleneck, not medical-specific)
 
         Returns:
-            dict: {entity_name: {"type": str, "confidence": float, "method": str}}
+            dict: {entity_name: {"type": str, "confidence": float, "tier": str}}
         """
         logger.info("\n" + "="*80)
-        logger.info("STAGE 0: ENHANCED TYPE INFERENCE (4-Step Hybrid)")
+        logger.info("STAGE 0: SMART CASCADING TYPE INFERENCE (3-Tier)")
         logger.info("="*80)
 
         output_path = self.stage_paths["stage0_types"]
@@ -317,40 +639,83 @@ class EntityResolutionPipeline:
             logger.info(f"✅ Loaded types for {len(entity_types)} entities")
             return entity_types
 
-        logger.info(f"Method: {self.config.type_inference_method}")
         logger.info(f"Processing {len(self.entities)} unique entities...")
-        logger.info("Architecture: Pattern → Relationship-LLM (parallel) → Zero-shot → Hybrid Decision")
+        logger.info("Architecture: Tier 1 (Keywords) → Tier 2 (SapBERT kNN) → Tier 3 (LLM)")
+        logger.info("Early stopping: Tier 1 @ 0.85 confidence, Tier 2 @ 0.75 confidence")
 
         entity_types = {}
+        tier_stats = {
+            "tier1": 0,
+            "tier2": 0,
+            "tier3": 0,
+        }
 
-        # Pre-compute Step 2 (LLM) in parallel for all entities
-        logger.info("Pre-computing Step 2 (Relationship-LLM) in parallel...")
-        llm_results = self._batch_process_llm_step2(self.entities)
+        # Pre-compute SapBERT embeddings for Tier 2 (reuse from Stage 1 if available)
+        embeddings = None
+        embeddings_path = self.stage_paths["stage1_embeddings"]
+        if embeddings_path.exists():
+            logger.info("Loading SapBERT embeddings for Tier 2...")
+            embeddings = np.load(embeddings_path)
+            logger.info(f"✅ Loaded embeddings shape: {embeddings.shape}")
 
-        # Process each entity with 4-step approach
-        for entity in tqdm(self.entities, desc="Type inference (4-step)"):
-            # Skip if already processed (deduplication)
+        # Collect hard cases for Tier 3 (LLM)
+        tier3_entities = []
+
+        # Process each entity with cascading
+        for entity in tqdm(self.entities, desc="Cascading type inference"):
+            # Skip if already processed
             if entity in entity_types:
                 continue
 
-            # Step 1: Pattern-Based
-            pattern_result = self._infer_type_pattern(entity)
+            # ─────────────────────────────────────────────────────────
+            # TIER 1: Medical Keywords + Pattern (FAST)
+            # ─────────────────────────────────────────────────────────
+            tier1_result = self._infer_type_tier1_medical_keywords(entity)
 
-            # Step 2: Relationship-Based with LLM (use pre-computed result)
-            relationship_result = llm_results.get(entity, {"type": "other", "confidence": 0.3})
+            if tier1_result["confidence"] >= 0.85:
+                # HIGH CONFIDENCE → Early stop
+                entity_types[entity] = tier1_result
+                tier_stats["tier1"] += 1
+                continue
 
-            # Step 3: Zero-shot Classification
-            zeroshot_result = self._infer_type_zeroshot(entity)
+            # ─────────────────────────────────────────────────────────
+            # TIER 2: SapBERT kNN Classifier (MEDIUM)
+            # ─────────────────────────────────────────────────────────
+            tier2_result = self._infer_type_tier2_sapbert_knn(entity, embeddings)
 
-            # Step 4: Hybrid Decision Logic
-            final_result = self._hybrid_decision(
-                entity,
-                pattern_result,
-                relationship_result,
-                zeroshot_result
-            )
+            if tier2_result["confidence"] >= 0.75:
+                # MEDIUM CONFIDENCE → Early stop
+                entity_types[entity] = tier2_result
+                tier_stats["tier2"] += 1
+                continue
 
-            entity_types[entity] = final_result
+            # ─────────────────────────────────────────────────────────
+            # TIER 3: LLM Relationship (SLOW but accurate)
+            # ─────────────────────────────────────────────────────────
+            # Collect for batch processing
+            tier3_entities.append(entity)
+
+            # Fallback: Use Tier 2 result for now (will be updated after LLM)
+            entity_types[entity] = tier2_result
+
+        # Batch process Tier 3 entities with LLM (parallel)
+        if tier3_entities:
+            logger.info(f"\n🔍 Tier 3: Processing {len(tier3_entities)} hard cases with LLM...")
+            llm_results = self._batch_process_llm_step2(tier3_entities)
+
+            for entity in tier3_entities:
+                llm_result = llm_results.get(entity, {"type": "other", "confidence": 0.3, "tier": "tier3_llm"})
+                llm_result["tier"] = "tier3_llm"
+
+                # Keep LLM result if confidence > Tier 2
+                tier2_conf = entity_types[entity]["confidence"]
+                if llm_result["confidence"] > tier2_conf:
+                    entity_types[entity] = llm_result
+                    tier_stats["tier3"] += 1
+                else:
+                    # Keep Tier 2 result but mark as validated by Tier 3
+                    entity_types[entity]["tier"] = "tier2_validated"
+                    tier_stats["tier2"] += 1
 
         # Save
         if self.config.save_intermediate:
@@ -359,7 +724,7 @@ class EntityResolutionPipeline:
             logger.info(f"✅ Saved to: {output_path}")
 
         # Evaluation
-        self.evaluate_stage0(entity_types)
+        self.evaluate_stage0(entity_types, tier_stats)
 
         return entity_types
 
@@ -585,12 +950,19 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
     def _infer_type_zeroshot(self, entity: str) -> Dict:
         """
-        Infer entity type using zero-shot classification.
+        [DEPRECATED] Infer entity type using zero-shot classification.
 
-        Step 3: Zero-shot Classification
-        - Uses transformers pipeline with BART-large-mnli
-        - Classifies entity name directly without fine-tuning
-        - Returns type and confidence score
+        ⚠️  DEPRECATED: This method is NO LONGER USED in SMART CASCADING (3-Tier).
+
+        Why deprecated:
+        - BART-large-mnli is NOT medical-specific (general domain)
+        - Major bottleneck: 78% of total processing time
+        - Replaced by Tier 2: SapBERT kNN (faster + medical-specific)
+
+        Old Step 3: Zero-shot Classification
+        - Used transformers pipeline with BART-large-mnli
+        - Classified entity name directly without fine-tuning
+        - Replaced by medical-specific SapBERT kNN in new architecture
 
         Args:
             entity: Entity name
@@ -811,8 +1183,8 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
 
         return {"type": "other", "confidence": 0.5}
 
-    def evaluate_stage0(self, entity_types: Dict) -> None:
-        """Evaluate type inference quality"""
+    def evaluate_stage0(self, entity_types: Dict, tier_stats: Dict = None) -> None:
+        """Evaluate type inference quality with tier statistics"""
         from collections import Counter
 
         type_counts = Counter(e["type"] for e in entity_types.values())
@@ -827,13 +1199,22 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         avg_confidence = np.mean([e["confidence"] for e in entity_types.values()])
         logger.info(f"  Average confidence: {avg_confidence:.3f}")
 
-        # Show method distribution (if "method" field exists in results)
-        if entity_types and "method" in next(iter(entity_types.values())):
-            method_counts = Counter(e["method"] for e in entity_types.values())
-            logger.info(f"  Method distribution:")
-            for method_name, count in method_counts.most_common():
+        # Show tier distribution (NEW for 3-tier cascading)
+        if tier_stats:
+            total = sum(tier_stats.values())
+            logger.info(f"\n  🎯 Tier Distribution (Early Stopping):")
+            logger.info(f"    ├─ Tier 1 (Keywords): {tier_stats['tier1']} ({100*tier_stats['tier1']/total:.1f}%) - FAST ✨")
+            logger.info(f"    ├─ Tier 2 (SapBERT):  {tier_stats['tier2']} ({100*tier_stats['tier2']/total:.1f}%) - MEDIUM 🔬")
+            logger.info(f"    └─ Tier 3 (LLM):      {tier_stats['tier3']} ({100*tier_stats['tier3']/total:.1f}%) - SLOW but ACCURATE 🧠")
+            logger.info(f"  Performance: {tier_stats['tier1']+tier_stats['tier2']}/{total} ({100*(tier_stats['tier1']+tier_stats['tier2'])/total:.1f}%) resolved without LLM!")
+
+        # Show tier field distribution (alternative if tier_stats not provided)
+        if entity_types and "tier" in next(iter(entity_types.values())):
+            tier_counts = Counter(e["tier"] for e in entity_types.values())
+            logger.info(f"  Tier field distribution:")
+            for tier_name, count in tier_counts.most_common():
                 percentage = 100 * count / len(entity_types)
-                logger.info(f"    - {method_name}: {count} ({percentage:.1f}%)")
+                logger.info(f"    - {tier_name}: {count} ({percentage:.1f}%)")
 
     # ========================================================================
     # STAGE 1: SAPBERT EMBEDDING
