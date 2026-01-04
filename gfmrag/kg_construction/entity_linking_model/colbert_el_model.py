@@ -74,33 +74,28 @@ class ColbertELModel(BaseELModel):
         Khởi tạo ColBERT model.
 
         Args:
-            model_name_or_path: Path hoặc HF model name
+            model_name_or_path: HF model name hoặc path
                                Default: "colbert-ir/colbertv2.0"
-                               Nếu local model tồn tại tại models/colbert/colbertv2.0,
-                               sẽ tự động dùng local model đó.
+                               RAGatouille tự động cache model sau lần đầu download.
             root: Thư mục lưu index
             force: Xóa index cũ và tạo lại nếu True
+
+        Note:
+            RAGatouille tự động cache ColBERT models tại ~/.cache/huggingface/
+            Lần đầu sẽ download, các lần sau dùng cache.
         """
         # Setup HF token from .env if available (cho private models hoặc rate limiting)
         _setup_hf_token()
 
-        # Ưu tiên dùng local model nếu có (tránh download từ HuggingFace)
-        local_model_path = "models/colbert/colbertv2.0"
-        if os.path.exists(local_model_path) and model_name_or_path == "colbert-ir/colbertv2.0":
-            logger.info(f"Using local ColBERT model from: {local_model_path}")
-            self.model_name_or_path = local_model_path
-        else:
-            self.model_name_or_path = model_name_or_path
-            if not os.path.exists(model_name_or_path):
-                logger.warning(
-                    f"Local model not found at {local_model_path}. "
-                    f"Will download from HuggingFace: {model_name_or_path}"
-                )
-
+        self.model_name_or_path = model_name_or_path
         self.root = root
         self.force = force
 
+        logger.info(f"Loading ColBERT model: {model_name_or_path}")
+        logger.info("(First run will download, then cache for reuse)")
+
         # Load pretrained ColBERT qua RAGatouille wrapper
+        # RAGatouille tự động cache model
         self.colbert_model = RAGPretrainedModel.from_pretrained(
             self.model_name_or_path,
             index_root=self.root,
@@ -265,13 +260,13 @@ class ColbertELModel(BaseELModel):
         """
         Compute pairwise similarity between two entities using ColBERT MaxSim.
 
-        FIXED: Index both entities together WITHOUT FAISS clustering.
-        This avoids FAISS clustering errors when dealing with small entity sets.
+        FIXED: Direct embedding computation WITHOUT indexing/clustering.
+        This completely avoids FAISS clustering errors for small entity pairs.
 
         Algorithm:
-        1. Index both entities together (use_faiss=False to avoid clustering)
-        2. Search entity1 → find entity2's score
-        3. Search entity2 → find entity1's score
+        1. Access ColBERT encoder directly from RAGatouille model
+        2. Encode both entities to get token-level embeddings
+        3. Compute MaxSim manually: sum of max similarities per query token
         4. Average bidirectional scores for symmetry
 
         Args:
@@ -287,71 +282,81 @@ class ColbertELModel(BaseELModel):
             0.856
 
         Note:
-            - Uses temporary index without FAISS
-            - Bidirectional similarity for symmetry
-            - Safe for single entity pairs
+            - No indexing required (avoids FAISS clustering completely)
+            - Direct ColBERT MaxSim computation
+            - Safe for any entity pair, including single pairs
         """
         try:
+            import torch
+
             # Clean entities
             entity1_clean = processing_phrases(entity1)
             entity2_clean = processing_phrases(entity2)
 
-            # Create temporary index name
-            temp_fingerprint = hashlib.md5(f"{entity1}{entity2}".encode()).hexdigest()
-            temp_index_name = f"Pairwise_{temp_fingerprint}"
+            # Access underlying ColBERT model from RAGatouille
+            # RAGatouille stores the ColBERT model in self.model attribute
+            try:
+                colbert_model = self.colbert_model.model
+            except AttributeError:
+                # Fallback: try alternative attribute paths
+                try:
+                    colbert_model = self.colbert_model.rag.model
+                except AttributeError:
+                    logger.error("Cannot access ColBERT model from RAGatouille")
+                    return 0.0
 
-            # Index both entities together WITHOUT FAISS
-            # This avoids clustering errors for small entity sets
-            self.colbert_model.index(
-                index_name=temp_index_name,
-                collection=[entity1_clean, entity2_clean],
-                overwrite_index=True,
-                split_documents=False,
-                use_faiss=False,  # CRITICAL: Disable FAISS to avoid clustering
+            # Encode entities as queries to get token embeddings
+            # ColBERT's queryFromText returns embeddings for query tokens
+            with torch.no_grad():
+                # Encode entity1
+                emb1 = colbert_model.queryFromText([entity1_clean], bsize=1)
+                if isinstance(emb1, tuple):
+                    emb1 = emb1[0]  # Extract embeddings if returned as tuple
+                if len(emb1.shape) == 3:
+                    emb1 = emb1[0]  # Shape: [num_tokens, dim]
+
+                # Encode entity2
+                emb2 = colbert_model.queryFromText([entity2_clean], bsize=1)
+                if isinstance(emb2, tuple):
+                    emb2 = emb2[0]
+                if len(emb2.shape) == 3:
+                    emb2 = emb2[0]  # Shape: [num_tokens, dim]
+
+            # Compute ColBERT MaxSim scores
+            # MaxSim(Q, D) = Σ_i max_j(Q_i · D_j)
+            # For each token in query, find max similarity with all tokens in document
+
+            # Direction 1: entity1 as query → entity2 as document
+            similarity_matrix_1to2 = torch.matmul(emb1, emb2.T)  # [tokens1, tokens2]
+            maxsim_1to2 = similarity_matrix_1to2.max(dim=1).values.sum().item()
+
+            # Direction 2: entity2 as query → entity1 as document
+            similarity_matrix_2to1 = torch.matmul(emb2, emb1.T)  # [tokens2, tokens1]
+            maxsim_2to1 = similarity_matrix_2to1.max(dim=1).values.sum().item()
+
+            # Bidirectional average for symmetric similarity
+            avg_score = (maxsim_1to2 + maxsim_2to1) / 2.0
+
+            # Normalize by average number of tokens to get [0, 1] range
+            # ColBERT MaxSim scores scale with number of tokens
+            num_tokens_avg = (emb1.shape[0] + emb2.shape[0]) / 2.0
+            normalized_score = avg_score / num_tokens_avg if num_tokens_avg > 0 else 0.0
+
+            # Clip to [0, 1] range (though scores can theoretically exceed 1.0)
+            final_score = max(0.0, min(1.0, normalized_score))
+
+            logger.debug(
+                f"ColBERT similarity '{entity1}' ↔ '{entity2}': {final_score:.4f} "
+                f"(raw: 1→2={maxsim_1to2:.2f}, 2→1={maxsim_2to1:.2f}, "
+                f"tokens: {emb1.shape[0]}/{emb2.shape[0]})"
             )
-
-            # Search entity1 → find entity2
-            results_1to2 = self.colbert_model.search(query=entity1_clean, k=2)
-            score_1to2 = 0.0
-            if results_1to2 and len(results_1to2) > 0:
-                # Find entity2 in results
-                for result in results_1to2:
-                    if isinstance(result, dict):
-                        content = result.get("content") or result.get("text", "")
-                        if content == entity2_clean:
-                            score_1to2 = result.get("score", 0.0)
-                            break
-
-            # Search entity2 → find entity1
-            results_2to1 = self.colbert_model.search(query=entity2_clean, k=2)
-            score_2to1 = 0.0
-            if results_2to1 and len(results_2to1) > 0:
-                # Find entity1 in results
-                for result in results_2to1:
-                    if isinstance(result, dict):
-                        content = result.get("content") or result.get("text", "")
-                        if content == entity1_clean:
-                            score_2to1 = result.get("score", 0.0)
-                            break
-
-            # Bidirectional average for symmetry
-            final_score = (score_1to2 + score_2to1) / 2.0
-
-            # Normalize to [0, 1] range (ColBERT scores can vary)
-            final_score = max(0.0, min(1.0, final_score))
-
-            logger.debug(f"ColBERT similarity '{entity1}' ↔ '{entity2}': {final_score:.4f} "
-                       f"(1→2: {score_1to2:.4f}, 2→1: {score_2to1:.4f})")
-
-            # Cleanup: Remove temporary index
-            temp_index_path = f"{self.root}/colbert/indexes/{temp_index_name}"
-            if os.path.exists(temp_index_path):
-                shutil.rmtree(temp_index_path)
 
             return final_score
 
         except Exception as e:
-            logger.error(f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}")
+            logger.error(
+                f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}"
+            )
             import traceback
             traceback.print_exc()
             return 0.0
