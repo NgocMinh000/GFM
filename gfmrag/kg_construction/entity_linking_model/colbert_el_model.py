@@ -229,13 +229,14 @@ class ColbertELModel(BaseELModel):
         """
         Compute pairwise similarity between two entities using ColBERT MaxSim.
 
-        IMPROVED: Direct embedding computation without indexing.
-        This avoids FAISS clustering errors when dealing with single entities.
+        FIXED: Index both entities together WITHOUT FAISS clustering.
+        This avoids FAISS clustering errors when dealing with small entity sets.
 
         Algorithm:
-        1. Encode both entities to token-level embeddings
-        2. Compute MaxSim: For each query token, find max similarity with doc tokens
-        3. Average bidirectional scores: (sim(e1→e2) + sim(e2→e1)) / 2
+        1. Index both entities together (use_faiss=False to avoid clustering)
+        2. Search entity1 → find entity2's score
+        3. Search entity2 → find entity1's score
+        4. Average bidirectional scores for symmetry
 
         Args:
             entity1: First entity string
@@ -250,81 +251,68 @@ class ColbertELModel(BaseELModel):
             0.856
 
         Note:
-            - Uses direct MaxSim computation, no indexing required
+            - Uses temporary index without FAISS
             - Bidirectional similarity for symmetry
             - Safe for single entity pairs
         """
         try:
-            import torch
-            import torch.nn.functional as F
-
             # Clean entities
             entity1_clean = processing_phrases(entity1)
             entity2_clean = processing_phrases(entity2)
 
-            # Get ColBERT encoder from RAGatouille model
-            # Access underlying ColBERT model
-            if hasattr(self.colbert_model, 'model'):
-                # RAGatouille wraps ColBERT model
-                colbert = self.colbert_model.model
-                if hasattr(colbert, 'model'):
-                    # Get actual ColBERT checkpoint
-                    checkpoint = colbert.model
-                else:
-                    checkpoint = colbert
-            else:
-                logger.error("Cannot access ColBERT encoder from RAGatouille model")
-                return 0.0
+            # Create temporary index name
+            temp_fingerprint = hashlib.md5(f"{entity1}{entity2}".encode()).hexdigest()
+            temp_index_name = f"Pairwise_{temp_fingerprint}"
 
-            # Encode entities to embeddings
-            # ColBERT queryFromText and docFromText methods
-            with torch.no_grad():
-                # Encode entity1 as query
-                query_emb = checkpoint.queryFromText([entity1_clean], bsize=1)[0]  # (num_tokens, dim)
+            # Index both entities together WITHOUT FAISS
+            # This avoids clustering errors for small entity sets
+            self.colbert_model.index(
+                index_name=temp_index_name,
+                collection=[entity1_clean, entity2_clean],
+                overwrite_index=True,
+                split_documents=False,
+                use_faiss=False,  # CRITICAL: Disable FAISS to avoid clustering
+            )
 
-                # Encode entity2 as document
-                doc_emb = checkpoint.docFromText([entity2_clean], bsize=1)[0]  # (num_tokens, dim)
+            # Search entity1 → find entity2
+            results_1to2 = self.colbert_model.search(query=entity1_clean, k=2)
+            score_1to2 = 0.0
+            if results_1to2 and len(results_1to2) > 0:
+                # Find entity2 in results
+                for result in results_1to2:
+                    if isinstance(result, dict):
+                        content = result.get("content") or result.get("text", "")
+                        if content == entity2_clean:
+                            score_1to2 = result.get("score", 0.0)
+                            break
 
-                # Compute MaxSim: entity1 → entity2
-                # For each query token, find max similarity with all doc tokens
-                scores_1to2 = []
-                for q_token in query_emb:
-                    # Cosine similarity with all doc tokens
-                    sims = F.cosine_similarity(
-                        q_token.unsqueeze(0),  # (1, dim)
-                        doc_emb,               # (num_doc_tokens, dim)
-                        dim=1
-                    )
-                    # Take max
-                    max_sim = sims.max().item()
-                    scores_1to2.append(max_sim)
+            # Search entity2 → find entity1
+            results_2to1 = self.colbert_model.search(query=entity2_clean, k=2)
+            score_2to1 = 0.0
+            if results_2to1 and len(results_2to1) > 0:
+                # Find entity1 in results
+                for result in results_2to1:
+                    if isinstance(result, dict):
+                        content = result.get("content") or result.get("text", "")
+                        if content == entity1_clean:
+                            score_2to1 = result.get("score", 0.0)
+                            break
 
-                # Average over all query tokens
-                score_1to2 = sum(scores_1to2) / len(scores_1to2) if scores_1to2 else 0.0
+            # Bidirectional average for symmetry
+            final_score = (score_1to2 + score_2to1) / 2.0
 
-                # Compute MaxSim: entity2 → entity1 (reverse direction)
-                scores_2to1 = []
-                for q_token in doc_emb:
-                    sims = F.cosine_similarity(
-                        q_token.unsqueeze(0),
-                        query_emb,
-                        dim=1
-                    )
-                    max_sim = sims.max().item()
-                    scores_2to1.append(max_sim)
+            # Normalize to [0, 1] range (ColBERT scores can vary)
+            final_score = max(0.0, min(1.0, final_score))
 
-                score_2to1 = sum(scores_2to1) / len(scores_2to1) if scores_2to1 else 0.0
+            logger.debug(f"ColBERT similarity '{entity1}' ↔ '{entity2}': {final_score:.4f} "
+                       f"(1→2: {score_1to2:.4f}, 2→1: {score_2to1:.4f})")
 
-                # Bidirectional average for symmetry
-                final_score = (score_1to2 + score_2to1) / 2.0
+            # Cleanup: Remove temporary index
+            temp_index_path = f"{self.root}/colbert/indexes/{temp_index_name}"
+            if os.path.exists(temp_index_path):
+                shutil.rmtree(temp_index_path)
 
-                # Normalize to [0, 1] range
-                final_score = max(0.0, min(1.0, final_score))
-
-                logger.debug(f"ColBERT similarity '{entity1}' ↔ '{entity2}': {final_score:.4f} "
-                           f"(1→2: {score_1to2:.4f}, 2→1: {score_2to1:.4f})")
-
-                return final_score
+            return final_score
 
         except Exception as e:
             logger.error(f"ColBERT pairwise similarity failed for '{entity1}' and '{entity2}': {e}")
