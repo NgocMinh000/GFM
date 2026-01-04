@@ -104,39 +104,52 @@ class ColbertELModel(BaseELModel):
     def index(self, entity_list: list) -> None:
         """
         Index entities với ColBERT.
-        
+
         Workflow:
         1. Tạo fingerprint (MD5 hash) từ entity_list
         2. Check cache: Nếu index đã tồn tại và force=False → reuse
         3. Clean entities bằng processing_phrases()
-        4. Encode và lưu vào FAISS index
-        
+        4. Encode và lưu vào index (FAISS cho large datasets, plain cho small)
+
         Args:
             entity_list: Danh sách entities cần index
-        
+
         Notes:
             - Index name format: "Entity_index_{md5_hash}"
-            - Dùng FAISS cho fast similarity search
-            - split_documents=False: Mỗi entity là 1 document nguyên vẹn
+            - Auto-detect small datasets: disable FAISS if <15 entities
+            - FAISS requires ≥64 embeddings for clustering (64 clusters default)
+            - Small datasets use plain index (no clustering)
         """
         # Tạo unique index name từ MD5 hash
         fingerprint = hashlib.md5("".join(entity_list).encode()).hexdigest()
         index_name = f"Entity_index_{fingerprint}"
-        
+
         # Xóa index cũ nếu force=True
         if os.path.exists(f"{self.root}/colbert/{fingerprint}") and self.force:
             shutil.rmtree(f"{self.root}/colbert/{fingerprint}")
-        
+
         # Clean entities: lowercase, remove special chars
         phrases = [processing_phrases(p) for p in entity_list]
-        
+
+        # Auto-detect small datasets and disable FAISS to avoid clustering errors
+        # FAISS requires ≥64 training points for 64 clusters
+        # Estimate: ~6 tokens/entity → need ≥11 entities for 64 embeddings
+        # Use threshold of 15 entities to be safe
+        use_faiss = len(entity_list) >= 15
+
+        if not use_faiss:
+            logger.info(
+                f"Small dataset detected ({len(entity_list)} entities). "
+                f"Using plain index (no FAISS clustering) to avoid clustering errors."
+            )
+
         # Tạo ColBERT index
         index_path = self.colbert_model.index(
             index_name=index_name,
             collection=phrases,
             overwrite_index=self.force if self.force else "reuse",
             split_documents=False,  # Không split entities thành chunks
-            use_faiss=True,         # Dùng FAISS cho speed
+            use_faiss=use_faiss,    # Auto: True cho ≥15 entities, False cho <15
         )
         self.index_path = index_path
 
