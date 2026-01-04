@@ -503,12 +503,16 @@ class EntityResolutionPipeline:
             entity_emb = embeddings[entity_id:entity_id+1]
         else:
             # Compute embedding on-the-fly (fallback)
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer(
-                self.config.sapbert_model,
-                device=self.config.embedding_device
-            )
-            entity_emb = model.encode(
+            # Cache model to avoid reloading for each entity
+            if not hasattr(self, '_tier2_sapbert_model'):
+                from sentence_transformers import SentenceTransformer
+                logger.info("  Loading SapBERT model for on-the-fly encoding...")
+                self._tier2_sapbert_model = SentenceTransformer(
+                    self.config.sapbert_model,
+                    device=self.config.embedding_device
+                )
+
+            entity_emb = self._tier2_sapbert_model.encode(
                 [entity],
                 batch_size=1,
                 show_progress_bar=False,
