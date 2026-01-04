@@ -200,9 +200,18 @@ Hoặc cache model giữa các runs để tránh download lại:
 ## Tóm tắt các fix
 
 ### Fix 1: FAISS Clustering Error ✅
+
+#### Fix 1.1: Pairwise Similarity (CRITICAL)
 - **Vấn đề:** Indexing 2 entities → không đủ data points cho clustering
 - **Fix:** `compute_pairwise_similarity()` dùng **direct encoding** thay vì indexing
 - **Kết quả:** Hoàn toàn tránh FAISS, tính MaxSim trực tiếp bằng torch
+- **API Fix:** Access `self.colbert_model.model.inference_ckpt` (not `.model`)
+
+#### Fix 1.2: Small Dataset Indexing
+- **Vấn đề:** Datasets <15 entities → FAISS cần ≥64 embeddings cho 64 clusters
+- **Fix:** `index()` tự động phát hiện small datasets và disable FAISS
+- **Logic:** `use_faiss = len(entity_list) >= 15`
+- **Kết quả:** Test datasets hoạt động, production datasets vẫn dùng FAISS
 
 ### Fix 2: Model Caching ✅
 - **Vấn đề:** Download model mỗi lần chạy, lỗi proxy/network
