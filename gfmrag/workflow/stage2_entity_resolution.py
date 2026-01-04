@@ -612,12 +612,13 @@ class EntityResolutionPipeline:
         """
         Classify entity types using SMART CASCADING (3-Tier) approach.
 
-        NEW Architecture (5-10x faster):
+        OPTIMIZED Architecture (5-10x faster, higher accuracy):
         ├─ TIER 1: Medical Keywords + Pattern (0.001s/entity)
-        │  └─ Early stop if confidence ≥ 0.85
+        │  └─ Early stop if confidence ≥ 0.80 (relaxed for more coverage)
         ├─ TIER 2: SapBERT kNN Classifier (0.01s/entity)
-        │  └─ Early stop if confidence ≥ 0.75
-        └─ TIER 3: LLM Relationship (2s/entity, only hard cases ~10%)
+        │  └─ Early stop if confidence ≥ 0.80 (strict for quality)
+        └─ TIER 3: GPT-4 Turbo LLM (2s/entity, hard cases ~15-20%)
+           └─ Model: gpt-4.1-2025-04-14 (higher accuracy than gpt-4o-mini)
 
         REMOVED:
         - Zero-shot BART (78% bottleneck, not medical-specific)
@@ -641,7 +642,8 @@ class EntityResolutionPipeline:
 
         logger.info(f"Processing {len(self.entities)} unique entities...")
         logger.info("Architecture: Tier 1 (Keywords) → Tier 2 (SapBERT kNN) → Tier 3 (LLM)")
-        logger.info("Early stopping: Tier 1 @ 0.85 confidence, Tier 2 @ 0.75 confidence")
+        logger.info("Early stopping: Tier 1 @ 0.80 confidence, Tier 2 @ 0.80 confidence")
+        logger.info("LLM Model: gpt-4.1-2025-04-14 (GPT-4 Turbo for high accuracy)")
 
         entity_types = {}
         tier_stats = {
@@ -672,7 +674,7 @@ class EntityResolutionPipeline:
             # ─────────────────────────────────────────────────────────
             tier1_result = self._infer_type_tier1_medical_keywords(entity)
 
-            if tier1_result["confidence"] >= 0.85:
+            if tier1_result["confidence"] >= 0.80:
                 # HIGH CONFIDENCE → Early stop
                 entity_types[entity] = tier1_result
                 tier_stats["tier1"] += 1
@@ -683,7 +685,7 @@ class EntityResolutionPipeline:
             # ─────────────────────────────────────────────────────────
             tier2_result = self._infer_type_tier2_sapbert_knn(entity, embeddings)
 
-            if tier2_result["confidence"] >= 0.75:
+            if tier2_result["confidence"] >= 0.80:
                 # MEDIUM CONFIDENCE → Early stop
                 entity_types[entity] = tier2_result
                 tier_stats["tier2"] += 1
@@ -892,7 +894,7 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
                     # Use init_langchain_model - auto-detects YEScale or OpenAI
                     self._llm_cache = init_langchain_model(
                         llm="openai",  # Will use YEScale if YESCALE_API_BASE_URL is set
-                        model_name="gpt-4o-mini",
+                        model_name="gpt-4.1-2025-04-14",  # GPT-4 Turbo for higher accuracy
                         temperature=0.0,
                     )
                     if yescale_url:
