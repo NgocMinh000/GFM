@@ -241,6 +241,38 @@ class CandidateGenerator:
             logger.info("Computing SapBERT embeddings for all UMLS concepts...")
             self._precompute_sapbert_embeddings()
 
+    def _encode_sapbert(self, texts: List[str]) -> np.ndarray:
+        """
+        Encode a small list of texts using SapBERT (for query encoding during inference).
+
+        This is different from _encode_sapbert_chunked which is for bulk encoding
+        millions of UMLS names during precomputation.
+
+        Args:
+            texts: List of text strings to encode (typically 1 query entity)
+
+        Returns:
+            Numpy array of embeddings (shape: [len(texts), 768])
+        """
+        device = self.sapbert_model.device
+
+        # Tokenize
+        inputs = self.sapbert_tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors='pt'
+        ).to(device)
+
+        # Encode
+        with torch.no_grad():
+            outputs = self.sapbert_model(**inputs)
+            embeddings = outputs.last_hidden_state[:, 0, :]  # CLS token
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        return embeddings.cpu().numpy()
+
     def _precompute_sapbert_embeddings(self):
         """Precompute SapBERT embeddings for all UMLS names using chunked processing"""
 
