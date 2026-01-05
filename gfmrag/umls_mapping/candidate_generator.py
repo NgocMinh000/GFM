@@ -146,7 +146,18 @@ class CandidateGenerator:
             sapbert_candidates = []
             for idx, score in zip(indices_batch[i], scores_batch[i]):
                 name = self.umls_names[idx]
-                cui = self.name_to_cui[name]
+                # Safe lookup with fallback
+                if name in self.name_to_cui:
+                    cui = self.name_to_cui[name]
+                else:
+                    # Try to find CUI via UMLS loader
+                    cuis = self.umls_loader.lookup_by_name(name)
+                    if cuis:
+                        cui = cuis[0]
+                    else:
+                        # Skip if no CUI found
+                        continue
+
                 sapbert_candidates.append(Candidate(
                     cui=cui,
                     name=name,
@@ -158,7 +169,18 @@ class CandidateGenerator:
             tfidf_candidates = []
             for idx, score in zip(tfidf_top_k_indices[i], tfidf_top_k_scores[i]):
                 name = self.umls_names[idx]
-                cui = self.name_to_cui[name]
+                # Safe lookup with fallback
+                if name in self.name_to_cui:
+                    cui = self.name_to_cui[name]
+                else:
+                    # Try to find CUI via UMLS loader
+                    cuis = self.umls_loader.lookup_by_name(name)
+                    if cuis:
+                        cui = cuis[0]
+                    else:
+                        # Skip if no CUI found
+                        continue
+
                 tfidf_candidates.append(Candidate(
                     cui=cui,
                     name=name,
@@ -207,7 +229,17 @@ class CandidateGenerator:
         candidates = []
         for idx, score in zip(top_k_indices, scores):
             name = self.umls_names[idx]
-            cui = self.name_to_cui[name]
+            # Safe lookup with fallback
+            if name in self.name_to_cui:
+                cui = self.name_to_cui[name]
+            else:
+                # Try to find CUI via UMLS loader
+                cuis = self.umls_loader.lookup_by_name(name)
+                if cuis:
+                    cui = cuis[0]
+                else:
+                    # Skip if no CUI found
+                    continue
 
             candidates.append(Candidate(
                 cui=cui,
@@ -238,7 +270,18 @@ class CandidateGenerator:
         for idx in top_k_indices:
             name = self.umls_names[idx]
             score = float(similarities[idx])
-            cui = self.name_to_cui[name]
+
+            # Safe lookup with fallback
+            if name in self.name_to_cui:
+                cui = self.name_to_cui[name]
+            else:
+                # Try to find CUI via UMLS loader
+                cuis = self.umls_loader.lookup_by_name(name)
+                if cuis:
+                    cui = cuis[0]
+                else:
+                    # Skip if no CUI found
+                    continue
 
             candidates.append(Candidate(
                 cui=cui,
