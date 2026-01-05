@@ -268,8 +268,15 @@ class CandidateGenerator:
                 'name_to_cui': self.name_to_cui
             }, f)
 
-    def _encode_sapbert(self, texts: List[str]) -> np.ndarray:
-        """Encode texts using SapBERT"""
+    def _encode_sapbert_with_checkpointing(
+        self,
+        texts: List[str],
+        start_idx: int = 0,
+        existing_embeddings: List = None,
+        checkpoint_path: Path = None,
+        checkpoint_every: int = 1000
+    ) -> np.ndarray:
+        """Encode texts with checkpointing to prevent data loss on crashes"""
         device = self.sapbert_model.device
         batch_size = self.config.sapbert_batch_size
 
@@ -278,12 +285,17 @@ class CandidateGenerator:
         if device.type == 'cuda':
             logger.info(f"   GPU Memory before: {torch.cuda.memory_allocated(0)/1e9:.2f}GB / {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
 
-        all_embeddings = []
+        all_embeddings = existing_embeddings if existing_embeddings else []
         total_batches = (len(texts) + batch_size - 1) // batch_size
+        start_batch = start_idx // batch_size
+
+        # Adjust texts if resuming
+        if start_idx > 0:
+            texts = texts[start_idx:]
 
         for i in tqdm(range(0, len(texts), batch_size),
                      desc=f"🔥 Encoding with SapBERT on {device.type.upper()}",
-                     total=total_batches,
+                     total=total_batches - start_batch,
                      unit="batch"):
             batch_texts = texts[i:i+batch_size]
 
@@ -304,10 +316,33 @@ class CandidateGenerator:
 
             all_embeddings.append(embeddings.cpu().numpy())
 
+            # Checkpoint every N batches
+            current_batch = start_batch + (i // batch_size)
+            if checkpoint_path and current_batch > 0 and current_batch % checkpoint_every == 0:
+                try:
+                    # Save checkpoint
+                    checkpoint_embeddings = np.vstack(all_embeddings)
+                    with open(checkpoint_path, 'wb') as f:
+                        pickle.dump({
+                            'embeddings': all_embeddings,
+                            'last_index': start_idx + i + batch_size,
+                            'last_batch': current_batch
+                        }, f)
+                    logger.info(f"   💾 Checkpoint saved at batch {current_batch}/{total_batches}")
+
+                    # Free GPU memory
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                        gpu_mem = torch.cuda.memory_allocated(0) / 1e9
+                        logger.info(f"   📊 GPU Memory: {gpu_mem:.2f}GB")
+
+                except Exception as e:
+                    logger.warning(f"   Failed to save checkpoint: {e}")
+
             # Log GPU memory every 1000 batches
-            if device.type == 'cuda' and (i // batch_size) % 1000 == 0 and i > 0:
+            elif device.type == 'cuda' and current_batch % 1000 == 0 and current_batch > 0:
                 gpu_mem = torch.cuda.memory_allocated(0) / 1e9
-                logger.info(f"   📊 Batch {i//batch_size}/{total_batches} - GPU Memory: {gpu_mem:.2f}GB")
+                logger.info(f"   📊 Batch {current_batch}/{total_batches} - GPU Memory: {gpu_mem:.2f}GB")
 
         # Log completion with GPU stats
         if device.type == 'cuda':
