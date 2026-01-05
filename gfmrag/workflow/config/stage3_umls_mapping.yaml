@@ -41,27 +41,30 @@ preprocessing:
   # Built-in medical abbreviations will be used by default
 
 # Stage 3.2: Candidate Generation
+# ⚡ PHASE 1 OPTIMIZATION: Increased selectivity for better quality
 candidate_generation:
   # Method A: SapBERT (Semantic Similarity)
   sapbert:
     model: cambridgeltl/SapBERT-from-PubMedBERT-fulltext
     batch_size: 256
     device: cuda  # cuda/cpu
-    top_k: 64     # Top candidates from SapBERT
+    top_k: 32     # OPTIMIZED: Reduced from 64 (more selective)
+    min_score: 0.70  # NEW: Minimum score threshold
 
   # Method B: TF-IDF Character N-grams
   tfidf:
     analyzer: char          # Character-level
     ngram_range: [3, 3]     # Trigrams
     min_df: 2               # Minimum document frequency
-    top_k: 64               # Top candidates from TF-IDF
+    top_k: 32               # OPTIMIZED: Reduced from 64 (more selective)
+    min_score: 0.60         # NEW: Minimum score threshold
 
   # Ensemble Fusion (Reciprocal Rank Fusion)
   ensemble:
     method: reciprocal_rank_fusion  # RRF
-    k_constant: 60                  # RRF constant
+    k_constant: 50                  # OPTIMIZED: Reduced from 60 (favor top ranks)
     diversity_bonus: 0.05            # Bonus for multiple method agreement
-    final_k: 128                    # Final number of candidates
+    final_k: 64                     # OPTIMIZED: Reduced from 128 (better quality)
 
 # Stage 3.3: Synonym Cluster Aggregation
 cluster_aggregation:
@@ -75,11 +78,13 @@ cluster_aggregation:
   output_k: 64               # Refined candidates after aggregation
 
 # Stage 3.4: Hard Negative Filtering & Semantic Type Checking
+# ⚡ PHASE 1 OPTIMIZATION: More aggressive filtering for precision
 hard_negative_filtering:
   # Hard Negative Detection
   hard_negative:
-    similarity_threshold: 0.7  # Pairs with string sim > 0.7 but different CUIs
-    penalty_weight: 0.1        # Penalty for hard negatives in top-10
+    similarity_threshold: 0.60  # OPTIMIZED: More strict (was 0.7) - catches more hard negatives
+    penalty_weight: 0.25        # OPTIMIZED: Stronger penalty (was 0.1) - penalize confusing candidates
+    top_k_check: 5              # NEW: Check top-5 candidates for hard negatives
 
   # Semantic Type Groups (UMLS Semantic Network)
   semantic_type_groups:
@@ -117,10 +122,11 @@ hard_negative_filtering:
     use_kg_relations: true  # Infer from relations (treats → drug, etc.)
 
   # Scoring
+  # ⚡ PHASE 1 OPTIMIZATION: Rebalanced weights for better type matching
   score_weights:
-    base_score: 0.7
-    type_match: 0.2
-    hard_negative_penalty: 0.1
+    base_score: 0.6                 # OPTIMIZED: Reduced (was 0.7) - less trust in raw scores
+    type_match: 0.25                # OPTIMIZED: Increased (was 0.2) - reward type matching
+    hard_negative_penalty: 0.15     # OPTIMIZED: Increased (was 0.1) - punish hard negatives more
 
   output_k: 32  # Filtered candidates
 
