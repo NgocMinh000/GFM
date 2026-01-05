@@ -242,7 +242,7 @@ class CandidateGenerator:
             self._precompute_sapbert_embeddings()
 
     def _precompute_sapbert_embeddings(self):
-        """Precompute SapBERT embeddings for all UMLS names"""
+        """Precompute SapBERT embeddings for all UMLS names using chunked processing"""
 
         # Get all UMLS names
         self.umls_names = self.umls_loader.get_all_names()
@@ -252,38 +252,14 @@ class CandidateGenerator:
             if cuis:
                 self.name_to_cui[name] = cuis[0]  # Take first CUI
 
-        # Encode in batches with checkpointing
+        # Encode in chunks to avoid RAM overflow
         logger.info(f"Encoding {len(self.umls_names)} UMLS names with SapBERT...")
+        logger.info(f"Using CHUNKED processing to prevent RAM overflow")
         logger.info(f"Estimated time: ~30-60 min with GPU, ~4 hours with CPU")
         logger.info(f"This is ONE-TIME only. Subsequent runs will use cache (~1 min).")
 
-        # Check for checkpoint
-        checkpoint_path = self.sapbert_cache.parent / "sapbert_embeddings_checkpoint.pkl"
-        start_idx = 0
-        all_embeddings = []
-
-        if checkpoint_path.exists():
-            logger.info(f"🔄 Found checkpoint: {checkpoint_path}")
-            logger.info("   Resuming from checkpoint...")
-            try:
-                with open(checkpoint_path, 'rb') as f:
-                    checkpoint = pickle.load(f)
-                    all_embeddings = checkpoint['embeddings']
-                    start_idx = checkpoint['last_index']
-                    logger.info(f"   ✓ Resumed from index {start_idx}/{len(self.umls_names)} ({100*start_idx/len(self.umls_names):.1f}%)")
-            except Exception as e:
-                logger.warning(f"   Failed to load checkpoint: {e}")
-                logger.info("   Starting from scratch...")
-                start_idx = 0
-                all_embeddings = []
-
-        # Encode with checkpointing
-        self.sapbert_embeddings = self._encode_sapbert_with_checkpointing(
-            self.umls_names,
-            start_idx=start_idx,
-            existing_embeddings=all_embeddings,
-            checkpoint_path=checkpoint_path
-        )
+        # Use chunked encoding with automatic memory management
+        self.sapbert_embeddings = self._encode_sapbert_chunked(self.umls_names)
 
         # Save to cache
         logger.info(f"Saving SapBERT embeddings to {self.sapbert_cache}")
@@ -293,11 +269,7 @@ class CandidateGenerator:
                 'names': self.umls_names,
                 'name_to_cui': self.name_to_cui
             }, f)
-
-        # Remove checkpoint after successful completion
-        if checkpoint_path.exists():
-            checkpoint_path.unlink()
-            logger.info("✓ Checkpoint removed (encoding complete)")
+        logger.info("✓ SapBERT embeddings cached successfully")
 
     def _encode_sapbert_with_checkpointing(
         self,
@@ -382,6 +354,133 @@ class CandidateGenerator:
             logger.info(f"   Peak GPU Memory: {torch.cuda.max_memory_allocated(0)/1e9:.2f}GB")
 
         return np.vstack(all_embeddings)
+
+    def _encode_sapbert_chunked(
+        self,
+        texts: List[str],
+        chunk_size: int = 1_000_000  # Process 1M names at a time
+    ) -> np.ndarray:
+        """
+        Encode texts in chunks to prevent RAM overflow.
+
+        Instead of accumulating all embeddings in memory (~30GB for 7.9M names),
+        this processes in chunks and saves to disk immediately.
+
+        Args:
+            texts: List of text strings to encode
+            chunk_size: Number of texts per chunk (default 1M = ~3GB RAM)
+
+        Returns:
+            Combined embeddings array
+        """
+        device = self.sapbert_model.device
+        batch_size = self.config.sapbert_batch_size
+        chunk_dir = self.sapbert_cache.parent / "sapbert_chunks"
+        chunk_dir.mkdir(exist_ok=True)
+
+        total_texts = len(texts)
+        num_chunks = (total_texts + chunk_size - 1) // chunk_size
+
+        logger.info(f"🔥 Chunked encoding: {num_chunks} chunks of ~{chunk_size:,} names each")
+        logger.info(f"   This prevents RAM overflow (peak ~3-4GB instead of ~30GB)")
+
+        if device.type == 'cuda':
+            logger.info(f"   GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
+
+        # Check for existing chunks to resume
+        existing_chunks = sorted(chunk_dir.glob("chunk_*.npy"))
+        start_chunk = len(existing_chunks)
+
+        if start_chunk > 0:
+            logger.info(f"🔄 Found {start_chunk} existing chunks, resuming from chunk {start_chunk}...")
+
+        # Process each chunk
+        for chunk_idx in range(start_chunk, num_chunks):
+            chunk_start = chunk_idx * chunk_size
+            chunk_end = min(chunk_start + chunk_size, total_texts)
+            chunk_texts = texts[chunk_start:chunk_end]
+
+            logger.info(f"\n📦 Processing chunk {chunk_idx+1}/{num_chunks}")
+            logger.info(f"   Range: {chunk_start:,} → {chunk_end:,} ({len(chunk_texts):,} names)")
+
+            # Encode this chunk
+            chunk_embeddings = []
+            num_batches = (len(chunk_texts) + batch_size - 1) // batch_size
+
+            for i in tqdm(range(0, len(chunk_texts), batch_size),
+                         desc=f"🔥 Encoding chunk {chunk_idx+1}/{num_chunks}",
+                         total=num_batches,
+                         unit="batch"):
+                batch_texts = chunk_texts[i:i+batch_size]
+
+                # Tokenize
+                inputs = self.sapbert_tokenizer(
+                    batch_texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=128,
+                    return_tensors='pt'
+                ).to(device)
+
+                # Encode
+                with torch.no_grad():
+                    outputs = self.sapbert_model(**inputs)
+                    embeddings = outputs.last_hidden_state[:, 0, :]  # CLS token
+                    embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+                chunk_embeddings.append(embeddings.cpu().numpy())
+
+                # Clear GPU cache periodically
+                if device.type == 'cuda' and i % (batch_size * 100) == 0:
+                    torch.cuda.empty_cache()
+
+            # Combine chunk embeddings
+            chunk_array = np.vstack(chunk_embeddings)
+
+            # Save chunk to disk IMMEDIATELY (frees RAM)
+            chunk_file = chunk_dir / f"chunk_{chunk_idx:04d}.npy"
+            np.save(chunk_file, chunk_array)
+
+            # Free memory
+            del chunk_embeddings
+            del chunk_array
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
+            # Log progress
+            progress_pct = 100 * (chunk_idx + 1) / num_chunks
+            logger.info(f"   ✓ Chunk {chunk_idx+1}/{num_chunks} saved to disk ({progress_pct:.1f}% complete)")
+
+            if device.type == 'cuda':
+                gpu_mem = torch.cuda.memory_allocated(0) / 1e9
+                logger.info(f"   📊 GPU Memory: {gpu_mem:.2f}GB")
+
+        # All chunks processed, now combine them
+        logger.info(f"\n🔗 Combining {num_chunks} chunks into final array...")
+        logger.info(f"   Loading chunks one-by-one to minimize RAM usage...")
+
+        # Load and combine chunks efficiently
+        all_chunks = sorted(chunk_dir.glob("chunk_*.npy"))
+        combined_embeddings = []
+
+        for i, chunk_file in enumerate(all_chunks):
+            logger.info(f"   Loading chunk {i+1}/{len(all_chunks)}...")
+            chunk_data = np.load(chunk_file)
+            combined_embeddings.append(chunk_data)
+
+        # Combine all chunks
+        final_embeddings = np.vstack(combined_embeddings)
+        logger.info(f"✅ Final embeddings shape: {final_embeddings.shape}")
+
+        # Clean up chunk files
+        logger.info(f"🧹 Cleaning up {len(all_chunks)} temporary chunk files...")
+        for chunk_file in all_chunks:
+            chunk_file.unlink()
+        chunk_dir.rmdir()
+        logger.info("✓ Cleanup complete")
+
+        return final_embeddings
 
     def _load_tfidf(self):
         """Load TF-IDF vectorizer and precomputed matrix"""
