@@ -252,12 +252,38 @@ class CandidateGenerator:
             if cuis:
                 self.name_to_cui[name] = cuis[0]  # Take first CUI
 
-        # Encode in batches
+        # Encode in batches with checkpointing
         logger.info(f"Encoding {len(self.umls_names)} UMLS names with SapBERT...")
         logger.info(f"Estimated time: ~30-60 min with GPU, ~4 hours with CPU")
         logger.info(f"This is ONE-TIME only. Subsequent runs will use cache (~1 min).")
 
-        self.sapbert_embeddings = self._encode_sapbert(self.umls_names)
+        # Check for checkpoint
+        checkpoint_path = self.sapbert_cache.parent / "sapbert_embeddings_checkpoint.pkl"
+        start_idx = 0
+        all_embeddings = []
+
+        if checkpoint_path.exists():
+            logger.info(f"🔄 Found checkpoint: {checkpoint_path}")
+            logger.info("   Resuming from checkpoint...")
+            try:
+                with open(checkpoint_path, 'rb') as f:
+                    checkpoint = pickle.load(f)
+                    all_embeddings = checkpoint['embeddings']
+                    start_idx = checkpoint['last_index']
+                    logger.info(f"   ✓ Resumed from index {start_idx}/{len(self.umls_names)} ({100*start_idx/len(self.umls_names):.1f}%)")
+            except Exception as e:
+                logger.warning(f"   Failed to load checkpoint: {e}")
+                logger.info("   Starting from scratch...")
+                start_idx = 0
+                all_embeddings = []
+
+        # Encode with checkpointing
+        self.sapbert_embeddings = self._encode_sapbert_with_checkpointing(
+            self.umls_names,
+            start_idx=start_idx,
+            existing_embeddings=all_embeddings,
+            checkpoint_path=checkpoint_path
+        )
 
         # Save to cache
         logger.info(f"Saving SapBERT embeddings to {self.sapbert_cache}")
@@ -267,6 +293,11 @@ class CandidateGenerator:
                 'names': self.umls_names,
                 'name_to_cui': self.name_to_cui
             }, f)
+
+        # Remove checkpoint after successful completion
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+            logger.info("✓ Checkpoint removed (encoding complete)")
 
     def _encode_sapbert_with_checkpointing(
         self,
