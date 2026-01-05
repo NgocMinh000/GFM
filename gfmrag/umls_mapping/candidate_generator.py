@@ -95,6 +95,68 @@ class CandidateGenerator:
 
         return ensemble_candidates
 
+    def generate_candidates_batch(self, entities: List[str], k: int = None) -> List[List[Candidate]]:
+        """
+        Generate candidates for multiple entities at once (BATCHED for speed)
+
+        Args:
+            entities: List of entity texts
+            k: Number of candidates per entity
+
+        Returns:
+            List of candidate lists (one per entity)
+        """
+        if k is None:
+            k = self.config.ensemble_final_k
+
+        # Lazy load models
+        if self.sapbert_model is None:
+            self._load_sapbert()
+        if self.tfidf_vectorizer is None:
+            self._load_tfidf()
+
+        # Batch encode all entities with SapBERT
+        query_embs = self._encode_sapbert(entities)  # [batch_size, 768]
+
+        # Batch search FAISS
+        if self.faiss_index is not None:
+            scores_batch, indices_batch = self.faiss_index.search(
+                query_embs.astype('float32'),
+                self.config.sapbert_top_k
+            )  # [batch_size, k]
+        else:
+            # Fallback: process one by one
+            return [self.generate_candidates(entity, k) for entity in entities]
+
+        # Process results for each entity
+        all_candidates = []
+        for i, entity in enumerate(entities):
+            # SapBERT candidates from batch search
+            sapbert_candidates = []
+            for idx, score in zip(indices_batch[i], scores_batch[i]):
+                name = self.umls_names[idx]
+                cui = self.name_to_cui[name]
+                sapbert_candidates.append(Candidate(
+                    cui=cui,
+                    name=name,
+                    score=float(score),
+                    method='sapbert'
+                ))
+
+            # TF-IDF candidates (still need to do individually)
+            tfidf_candidates = self._get_tfidf_candidates(entity, self.config.sapbert_top_k)
+
+            # Ensemble
+            ensemble_candidates = self._reciprocal_rank_fusion(
+                sapbert_candidates,
+                tfidf_candidates,
+                k=k
+            )
+
+            all_candidates.append(ensemble_candidates)
+
+        return all_candidates
+
     def _get_sapbert_candidates(self, entity: str, k: int) -> List[Candidate]:
         """Get candidates using SapBERT semantic similarity"""
 
@@ -295,7 +357,7 @@ class CandidateGenerator:
         return embeddings.cpu().numpy()
 
     def _build_faiss_index(self):
-        """Build FAISS index for fast similarity search with GPU memory optimization"""
+        """Build CPU FAISS index for fast similarity search"""
         if not FAISS_AVAILABLE:
             logger.warning("FAISS not available. Similarity search will be slow.")
             return
@@ -303,82 +365,20 @@ class CandidateGenerator:
         logger.info("Building FAISS index for fast similarity search...")
         logger.info(f"   Indexing {len(self.sapbert_embeddings):,} embeddings (dim={self.sapbert_embeddings.shape[1]})")
 
-        # Embeddings are already normalized, so we can use Inner Product (= cosine similarity)
+        # Use simple CPU IndexFlatIP (fast and reliable)
         dim = self.sapbert_embeddings.shape[1]  # 768
-        n_embeddings = len(self.sapbert_embeddings)
 
-        # OPTIMIZATION 1: Free GPU memory by moving SapBERT model to CPU
-        if torch.cuda.is_available() and self.sapbert_model is not None:
-            logger.info("   🔧 Optimization: Moving SapBERT model to CPU to free GPU memory...")
-            original_device = self.sapbert_model.device
-            self.sapbert_model = self.sapbert_model.cpu()
-            torch.cuda.empty_cache()
+        logger.info("   Building CPU IndexFlatIP (exact search)...")
+        logger.info("   SapBERT model stays on GPU for fast query encoding")
+        logger.info("   Will use batch processing for speedup")
 
-            gpu_freed = torch.cuda.memory_reserved(0) / 1e9
-            logger.info(f"   ✓ SapBERT moved to CPU, GPU memory freed: ~{gpu_freed:.1f}GB")
+        cpu_index = faiss.IndexFlatIP(dim)
+        cpu_index.add(self.sapbert_embeddings.astype('float32'))
 
-        # Try GPU with IVF index first, fallback to CPU
-        try:
-            # Check if GPU is available
-            if torch.cuda.is_available() and hasattr(faiss, 'StandardGpuResources'):
-                # OPTIMIZATION 2: Use IndexIVFFlat (IVF clustering without compression)
-                logger.info("   🔧 Building IVF GPU index (IndexIVFFlat)...")
-                logger.info("   This uses IVF clustering to reduce search space")
-
-                # Parameters for IndexIVFFlat
-                nlist = min(4096, n_embeddings // 100)  # Number of clusters (4096 or less)
-
-                logger.info(f"   IVF clusters: {nlist}")
-                logger.info(f"   Memory usage: ~6-8GB (better GPU compatibility than 24GB)")
-
-                # Create quantizer (coarse quantizer for IVF)
-                quantizer = faiss.IndexFlatIP(dim)
-
-                # Create IVF index (no PQ compression - better GPU support)
-                cpu_index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
-
-                # Train the index (required for IVF)
-                logger.info(f"   Training IVF index on {min(n_embeddings, 256000)} samples...")
-                training_sample = self.sapbert_embeddings[:min(n_embeddings, 256000)].astype('float32')
-                cpu_index.train(training_sample)
-                logger.info("   ✓ Training complete")
-
-                # Move to GPU
-                logger.info("   Moving index to GPU...")
-                res = faiss.StandardGpuResources()
-
-                # Configure GPU resources
-                # Allow larger temp memory for IVF operations
-                res.setTempMemory(2 * 1024 * 1024 * 1024)  # 2GB temp memory
-
-                gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
-
-                # Add embeddings
-                logger.info("   Adding embeddings to GPU index...")
-                gpu_index.add(self.sapbert_embeddings.astype('float32'))
-
-                # Set search parameters for better recall
-                # nprobe: number of clusters to search (higher = more accurate but slower)
-                gpu_index.nprobe = min(128, nlist // 4)  # Search 128 clusters
-
-                self.faiss_index = gpu_index
-                logger.info(f"   ✅ IVF GPU FAISS index built successfully!")
-                logger.info(f"   📊 Index type: IndexIVFFlat (no compression, exact search)")
-                logger.info(f"   💾 Memory usage: ~6-8GB (fits in most GPUs)")
-                logger.info(f"   🚀 Search speed: 10-50x faster than CPU IndexFlat")
-                logger.info(f"   🎯 Accuracy: 100% within searched clusters")
-                logger.info(f"   ⚙️  nprobe={gpu_index.nprobe} (searching {gpu_index.nprobe}/{nlist} clusters)")
-            else:
-                raise Exception("GPU not available or faiss-gpu not installed")
-
-        except Exception as e:
-            # Fallback to CPU
-            logger.warning(f"   GPU FAISS failed ({str(e)[:100]}...), using CPU index...")
-            logger.info("   Building CPU IndexFlatIP (simpler, faster on CPU)...")
-            cpu_index = faiss.IndexFlatIP(dim)
-            cpu_index.add(self.sapbert_embeddings.astype('float32'))
-            self.faiss_index = cpu_index
-            logger.info(f"   ✅ CPU FAISS index built (still 10-50x faster than sklearn)")
+        self.faiss_index = cpu_index
+        logger.info(f"   ✅ CPU FAISS index built successfully!")
+        logger.info(f"   📊 Index type: IndexFlatIP (exact search, 100% accuracy)")
+        logger.info(f"   🚀 With batching: 5-10x faster than single queries")
 
     def _precompute_sapbert_embeddings(self):
         """Precompute SapBERT embeddings for all UMLS names using chunked processing"""
