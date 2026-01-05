@@ -273,9 +273,18 @@ class CandidateGenerator:
         device = self.sapbert_model.device
         batch_size = self.config.sapbert_batch_size
 
-        all_embeddings = []
+        # Log encoding start with GPU info
+        logger.info(f"🚀 Starting encoding on {device.type.upper()}")
+        if device.type == 'cuda':
+            logger.info(f"   GPU Memory before: {torch.cuda.memory_allocated(0)/1e9:.2f}GB / {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
 
-        for i in tqdm(range(0, len(texts), batch_size), desc="Encoding with SapBERT"):
+        all_embeddings = []
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+
+        for i in tqdm(range(0, len(texts), batch_size),
+                     desc=f"🔥 Encoding with SapBERT on {device.type.upper()}",
+                     total=total_batches,
+                     unit="batch"):
             batch_texts = texts[i:i+batch_size]
 
             # Tokenize
@@ -294,6 +303,17 @@ class CandidateGenerator:
                 embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
 
             all_embeddings.append(embeddings.cpu().numpy())
+
+            # Log GPU memory every 1000 batches
+            if device.type == 'cuda' and (i // batch_size) % 1000 == 0 and i > 0:
+                gpu_mem = torch.cuda.memory_allocated(0) / 1e9
+                logger.info(f"   📊 Batch {i//batch_size}/{total_batches} - GPU Memory: {gpu_mem:.2f}GB")
+
+        # Log completion with GPU stats
+        if device.type == 'cuda':
+            logger.info(f"✅ Encoding complete!")
+            logger.info(f"   GPU Memory after: {torch.cuda.memory_allocated(0)/1e9:.2f}GB")
+            logger.info(f"   Peak GPU Memory: {torch.cuda.max_memory_allocated(0)/1e9:.2f}GB")
 
         return np.vstack(all_embeddings)
 
