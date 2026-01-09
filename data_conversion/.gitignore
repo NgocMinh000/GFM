@@ -30,3 +30,4 @@ output/*.txt
 # Input files (users will add their own)
 input/*.csv
 !input/sample_data.csv
+primekg_analysis/
