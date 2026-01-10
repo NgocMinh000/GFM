@@ -157,6 +157,20 @@ class MONDOParser:
                                 'ontology': ont
                             })
 
+                # Extract from property_value skos:exactMatch (common format)
+                # Format: property_value: skos:exactMatch UMLS:C0012634
+                if current_id and 'property_value: skos:exactMatch UMLS:' in line:
+                    # Extract UMLS CUI after "UMLS:"
+                    umls_cui = line.split('UMLS:')[1].strip()
+                    # Remove any trailing quotes or whitespace
+                    umls_cui = umls_cui.split()[0].strip('"')
+                    if umls_cui.startswith('C'):  # Valid UMLS CUI
+                        mondo_xrefs.append({
+                            'mondo_id': f"MONDO:{current_id}",
+                            'umls_id': umls_cui,
+                            'ontology': 'UMLS'
+                        })
+
                 # Extract from property_value closeMatch (alternative format)
                 if current_id and 'property_value: http://www.geneontology.org/formats/oboInOwl#hasDbXref' in line:
                     # Extract URL from property value
