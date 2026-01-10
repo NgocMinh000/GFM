@@ -153,6 +153,16 @@ class PrimeKGToUMLSConverter:
             df_clean[umls_col] = df_clean[umls_col].astype(str).str.strip()
             df_clean[mondo_col] = df_clean[mondo_col].astype(str).str.strip()
 
+            # Normalize MONDO IDs to match kg.csv format
+            # kg.csv uses: "8019", "11043" (no prefix, no leading zeros)
+            # umls_mondo.csv uses: "MONDO:0008019" (with prefix and leading zeros)
+            # Strip prefix: "MONDO:0008019" → "0008019"
+            # Strip leading zeros: "0008019" → "8019"
+            df_clean[mondo_col] = df_clean[mondo_col].str.replace('MONDO:', '', regex=False)
+            df_clean[mondo_col] = df_clean[mondo_col].str.lstrip('0')
+            # Handle edge case: if all zeros, keep one zero
+            df_clean[mondo_col] = df_clean[mondo_col].replace('', '0')
+
             # Create bidirectional mappings
             self.mondo_to_umls = dict(zip(df_clean[mondo_col], df_clean[umls_col]))
             self.umls_to_mondo = dict(zip(df_clean[umls_col], df_clean[mondo_col]))
