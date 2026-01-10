@@ -172,20 +172,26 @@ class PrimeKGPipeline:
             logger.info("STEP 1: Download PrimeKG Data - SKIPPED")
             logger.info("="*60)
 
-            # Check if files exist
+            # Check if kg.csv exists
             if not self.kg_path.exists():
                 logger.error(f"kg.csv not found at {self.kg_path}")
                 logger.error("Run without --skip-download or provide file manually")
                 return False
 
-            if not self.mapping_path.exists():
-                logger.error(f"umls_mondo.csv not found at {self.mapping_path}")
-                logger.error("Run without --skip-download or provide file manually")
-                return False
+            logger.info(f"✓ Using existing kg.csv: {self.kg_path}")
 
-            logger.info(f"✓ Using existing files:")
-            logger.info(f"  - {self.kg_path}")
-            logger.info(f"  - {self.mapping_path}")
+            # Check mapping file only if strategy needs it
+            if self.strategy == 'map':
+                if not self.mapping_path.exists():
+                    logger.warning(f"umls_mondo.csv not found at {self.mapping_path}")
+                    logger.warning("Mapping file not available - will fall back to filter strategy")
+                    # Update strategy to filter
+                    self.strategy = 'filter'
+                else:
+                    logger.info(f"✓ Using existing mapping: {self.mapping_path}")
+            else:
+                logger.info(f"✓ Strategy '{self.strategy}' - mapping file not required")
+
             return True
 
         cmd = [
@@ -206,9 +212,11 @@ class PrimeKGPipeline:
             '--strategy', self.strategy
         ]
 
-        # Add mapping file if using map strategy
-        if self.strategy == 'map':
+        # Add mapping file if using map strategy and file exists
+        if self.strategy == 'map' and self.mapping_path.exists():
             cmd.extend(['--mapping', str(self.mapping_path)])
+        elif self.strategy == 'map' and not self.mapping_path.exists():
+            logger.warning("Mapping file not found, converter will fall back to filter strategy")
 
         # Add keep-unmapped if requested
         if self.keep_unmapped:
