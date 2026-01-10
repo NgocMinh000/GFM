@@ -62,5 +62,11 @@ data/
 checkpoints/
 wandb/
 
+# PrimeKG data and output directories
+primekg_data/
+primekg_output/
+data_conversion/primekg_data/
+data_conversion/primekg_output/
+
 # Downloaded models (too large for Git)
 models/
