@@ -92,18 +92,79 @@ class PrimeKGToUMLSConverter:
         logger.info(f"Loading UMLS-MONDO mapping from: {self.umls_mondo_path}")
 
         try:
-            df = pd.read_csv(self.umls_mondo_path)
+            df = pd.read_csv(self.umls_mondo_path, low_memory=False)
 
-            # Check columns
-            if 'umls_id' not in df.columns or 'mondo_id' not in df.columns:
-                raise ValueError("Mapping file must have 'umls_id' and 'mondo_id' columns")
+            # Flexible column name detection
+            # Try various possible column names for UMLS and MONDO
+            umls_col = None
+            mondo_col = None
+
+            # Possible UMLS column names (case-insensitive)
+            umls_variants = ['umls_id', 'umls', 'umls_cui', 'cui', 'umls_cid', 'umls_concept_id']
+            # Possible MONDO column names (case-insensitive)
+            mondo_variants = ['mondo_id', 'mondo', 'mondo_cui', 'mondo_code', 'disease_id']
+
+            # Convert column names to lowercase for comparison
+            col_lower = {col.lower(): col for col in df.columns}
+
+            # Find UMLS column
+            for variant in umls_variants:
+                if variant.lower() in col_lower:
+                    umls_col = col_lower[variant.lower()]
+                    break
+
+            # Find MONDO column
+            for variant in mondo_variants:
+                if variant.lower() in col_lower:
+                    mondo_col = col_lower[variant.lower()]
+                    break
+
+            # If still not found, check if there are only 2 columns
+            if not umls_col or not mondo_col:
+                if len(df.columns) == 2:
+                    logger.warning(f"Using first 2 columns as mapping: {df.columns[0]} → {df.columns[1]}")
+                    # Assume first column is source (UMLS or MONDO), second is target
+                    # Try to detect which is which by checking a sample value
+                    sample_val_0 = str(df.iloc[0, 0])
+                    sample_val_1 = str(df.iloc[0, 1])
+
+                    if sample_val_0.startswith('C') and sample_val_1.startswith('MONDO'):
+                        umls_col = df.columns[0]
+                        mondo_col = df.columns[1]
+                    elif sample_val_1.startswith('C') and sample_val_0.startswith('MONDO'):
+                        umls_col = df.columns[1]
+                        mondo_col = df.columns[0]
+                    else:
+                        # Default: assume column order is umls, mondo
+                        umls_col = df.columns[0]
+                        mondo_col = df.columns[1]
+                else:
+                    available_cols = ', '.join(df.columns)
+                    raise ValueError(
+                        f"Could not find UMLS and MONDO columns in mapping file.\n"
+                        f"Available columns: {available_cols}\n"
+                        f"Expected one of: {umls_variants} for UMLS, {mondo_variants} for MONDO"
+                    )
+
+            logger.info(f"Using columns: UMLS='{umls_col}', MONDO='{mondo_col}'")
+
+            # Clean data: remove NaN values and convert to string
+            df_clean = df[[umls_col, mondo_col]].dropna()
+            df_clean[umls_col] = df_clean[umls_col].astype(str).str.strip()
+            df_clean[mondo_col] = df_clean[mondo_col].astype(str).str.strip()
 
             # Create bidirectional mappings
-            self.mondo_to_umls = dict(zip(df['mondo_id'], df['umls_id']))
-            self.umls_to_mondo = dict(zip(df['umls_id'], df['mondo_id']))
+            self.mondo_to_umls = dict(zip(df_clean[mondo_col], df_clean[umls_col]))
+            self.umls_to_mondo = dict(zip(df_clean[umls_col], df_clean[mondo_col]))
 
             logger.info(f"Loaded {len(self.mondo_to_umls)} MONDO→UMLS mappings")
             logger.info(f"Loaded {len(self.umls_to_mondo)} UMLS→MONDO mappings")
+
+            # Show sample mappings
+            if len(self.mondo_to_umls) > 0:
+                sample_mondo = list(self.mondo_to_umls.keys())[0]
+                sample_umls = self.mondo_to_umls[sample_mondo]
+                logger.info(f"Sample mapping: {sample_mondo} → {sample_umls}")
 
         except Exception as e:
             raise ValueError(f"Failed to load mapping file: {e}")
