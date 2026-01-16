@@ -650,6 +650,76 @@ save_intermediate: True
 }
 ```
 
+#### **Phase A Metrics** (Academic Research-Based)
+
+##### 1. Reduction Ratio (RR) - Blocking Efficiency
+**Reference**: BlockingPy documentation ([blockingpy.readthedocs.io](https://blockingpy.readthedocs.io))
+
+Measures how effective the blocking step reduced the comparison space:
+```
+RR = 1 - |C| / |P|
+
+Where:
+- C = candidate pairs after blocking
+- P = total possible pairs = n(n-1)/2
+```
+
+Example:
+```json
+{
+  "reduction_ratio": 0.9995,
+  "reduction_ratio_pct": "99.95%",
+  "candidate_pairs": 52000,
+  "total_possible_pairs": 99995000
+}
+```
+
+**Interpretation**:
+- RR ≥ 0.999 → Excellent blocking (>99.9% reduction)
+- RR ≥ 0.99 → Very good blocking
+- RR ≥ 0.95 → Good blocking
+- RR < 0.95 → Needs improvement
+
+**Usage**: Call `metrics.compute_reduction_ratio(num_entities, candidate_pairs)` after FAISS blocking.
+
+##### 2. Score Margin (Δ) - Match Confidence
+**Reference**: ER-Evaluation framework, BlockingPy metrics
+
+Measures confidence gap between top-1 and top-2 matches for each entity:
+```
+Δ(entity) = score_1 - score_2
+```
+
+Example:
+```json
+{
+  "entities_with_margin": 8500,
+  "mean_margin": 0.145,
+  "median_margin": 0.132,
+  "min_margin": 0.001,
+  "max_margin": 0.398,
+  "high_margin_count": 2100,
+  "high_margin_pct": 0.247
+}
+```
+
+**Interpretation**:
+- Δ ≥ 0.20 → Confident, unambiguous match (high margin threshold)
+- 0.10 ≤ Δ < 0.20 → Moderate confidence
+- Δ < 0.10 → Ambiguous match, needs human review
+
+**Usage**: Call `metrics.compute_score_margins(entity_scores)` after multi-feature scoring, where `entity_scores` is a dict mapping `entity_id -> List[float]` (sorted descending).
+
+**Example**:
+```python
+# After scoring step
+entity_scores = {
+    "aspirin": [0.95, 0.72, 0.68],  # Δ = 0.95 - 0.72 = 0.23 (confident)
+    "tylenol": [0.85, 0.83, 0.80],  # Δ = 0.85 - 0.83 = 0.02 (ambiguous)
+}
+metrics.compute_score_margins(entity_scores)
+```
+
 ---
 
 ## VISUALIZATIONS

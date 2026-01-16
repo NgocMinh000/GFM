@@ -829,6 +829,153 @@ general:
 }
 ```
 
+### **Phase A Metrics** (Academic Research-Based, No Gold Labels)
+
+#### 1. Semantic Type Consistency - Quality Validation
+**Reference**: UMLS Semantic Network documentation ([lhncbc.nlm.nih.gov/semanticnetwork](https://lhncbc.nlm.nih.gov/semanticnetwork/))
+
+**NO GOLD LABELS NEEDED** - Uses weak supervision from Stage 2 type inference.
+
+Validates if UMLS semantic types match KG entity types as a quality signal:
+
+**Type Mapping**:
+```
+KG Type → UMLS Semantic Types
+--------   -------------------
+drug     → Pharmacologic Substance, Antibiotic, Vitamin, Hormone
+disease  → Disease or Syndrome, Neoplastic Process
+symptom  → Sign or Symptom, Finding
+procedure→ Therapeutic/Diagnostic Procedure
+gene     → Gene or Genome, Amino Acid/Protein
+anatomy  → Body Part/Organ/Component, Tissue, Cell
+```
+
+Example:
+```json
+{
+  "consistent_mappings": 485,
+  "inconsistent_mappings": 76,
+  "no_type_info": 10,
+  "consistency_rate": 0.864,
+  "consistency_pct": "86.4%",
+  "sample_mismatches": [
+    {
+      "entity": "aspirin",
+      "kg_type": "drug",
+      "umls_types": ["Organic Chemical"],
+      "expected_types": ["Pharmacologic Substance", "Antibiotic"]
+    }
+  ]
+}
+```
+
+**Interpretation**:
+- Consistency ≥ 90% → Excellent mapping quality
+- Consistency 80-90% → Good mapping quality
+- Consistency < 80% → Review mismatches, may indicate type inference issues
+
+**Usage**:
+```python
+semantic_consistency = Stage6Metrics.compute_semantic_type_consistency(
+    final_mappings=final_mappings,
+    umls_loader=umls_loader,
+    kg_entity_types=entity_types_from_stage2
+)
+```
+
+#### 2. Funnel Efficiency - Pipeline Bottleneck Analysis
+**Reference**: Pipeline optimization best practices
+
+Tracks candidate reduction and timing across all pipeline stages:
+
+Example:
+```json
+{
+  "funnel_stages": [
+    {
+      "stage": "Stage 3.2: Candidate Generation",
+      "input": 571,
+      "output": 73088,  // 571 entities × 128 candidates
+      "retention_rate": 1.0,
+      "duration_seconds": 671.98,
+      "throughput_per_sec": 108.8
+    },
+    {
+      "stage": "Stage 3.3: Cluster Aggregation",
+      "input": 73088,
+      "output": 36544,  // 64 candidates per entity
+      "retention_rate": 0.50,
+      "duration_seconds": 24.15,
+      "throughput_per_sec": 1513.3
+    },
+    {
+      "stage": "Stage 3.4: Hard Negative Filtering",
+      "input": 36544,
+      "output": 18272,  // 32 candidates per entity
+      "retention_rate": 0.50,
+      "duration_seconds": 21.32,
+      "throughput_per_sec": 857.1
+    },
+    {
+      "stage": "Stage 3.6: Final Mappings",
+      "input": 18272,
+      "output": 571,  // 1 mapping per entity
+      "retention_rate": 0.031,
+      "duration_seconds": 6.00,
+      "throughput_per_sec": 95.2
+    }
+  ],
+  "total_reduction_rate": 0.992,
+  "total_reduction_pct": "99.2%",
+  "bottleneck_stage": "Stage 3.2: Candidate Generation",
+  "bottleneck_duration": 671.98
+}
+```
+
+**Interpretation**:
+- **Bottleneck**: Stage with highest duration → optimization target
+- **Low throughput**: Stages < 100 items/s may need parallelization
+- **High retention**: Stages with retention > 0.8 may not filter enough
+
+**Usage**: Automatically computed by `MetricsTracker.compute_funnel_efficiency()`
+
+#### 3. Coverage Curve - Confidence Threshold Tuning
+**Reference**: Calibration analysis, Precision-Recall trade-offs
+
+Shows coverage vs confidence threshold to find optimal production cutoff:
+
+Example:
+```json
+{
+  "coverage_curve": [
+    {"threshold": 0.50, "coverage": 1.000, "coverage_pct": "100.0%", "entities_covered": 571},
+    {"threshold": 0.60, "coverage": 0.998, "coverage_pct": "99.8%", "entities_covered": 570},
+    {"threshold": 0.70, "coverage": 0.875, "coverage_pct": "87.5%", "entities_covered": 500},
+    {"threshold": 0.80, "coverage": 0.245, "coverage_pct": "24.5%", "entities_covered": 140},
+    {"threshold": 0.90, "coverage": 0.007, "coverage_pct": "0.7%", "entities_covered": 4}
+  ],
+  "total_entities": 571
+}
+```
+
+**Interpretation**:
+- **High coverage needed**: Use τ = 0.60-0.65 (covers ~95%+)
+- **High precision needed**: Use τ = 0.80-0.85 (covers ~20-40%)
+- **Balanced**: Use τ = 0.70-0.75 (covers ~70-85%)
+
+**Typical Production Thresholds**:
+- Medical QA systems: τ = 0.70 (balance precision/coverage)
+- Clinical decision support: τ = 0.85 (high precision required)
+- Knowledge base construction: τ = 0.60 (maximize coverage)
+
+**Usage**:
+```python
+coverage_curve = Stage6Metrics.compute_coverage_curve(
+    final_mappings=final_mappings,
+    confidence_thresholds=[0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
+)
+```
+
 ---
 
 ## VISUALIZATIONS

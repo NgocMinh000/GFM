@@ -103,6 +103,14 @@ class EntityResolutionMetrics:
             "linking_time": 0.0,
         }
 
+        # Blocking Efficiency Metrics (Phase A addition)
+        self.blocking_metrics = {
+            "reduction_ratio": 0.0,  # RR = 1 - |C|/|P|
+            "reduction_ratio_pct": "0%",
+            "candidate_pairs": 0,
+            "total_possible_pairs": 0,
+        }
+
         # Cluster-based Metrics (inspired by 2024 arxiv:2404.05622)
         self.cluster_metrics = {
             "num_clusters": 0,
@@ -128,6 +136,20 @@ class EntityResolutionMetrics:
             "medium_confidence_pct": 0.0,
             "low_confidence_pct": 0.0,
         }
+
+        # Score Margin Metrics (Phase A addition)
+        self.score_margin_metrics = {
+            "mean_margin": 0.0,  # Δ(entity) = score_1 - score_2
+            "median_margin": 0.0,
+            "min_margin": 0.0,
+            "max_margin": 0.0,
+            "entities_with_margin": 0,  # Entities with >= 2 candidates
+            "high_margin_count": 0,  # margin >= 0.20 (confident matches)
+            "high_margin_pct": 0.0,
+        }
+
+        # Raw data for margin analysis
+        self._score_margins = []  # List of margins per entity
 
         # Graph Structure Metrics
         self.graph_metrics = {
@@ -298,6 +320,106 @@ class EntityResolutionMetrics:
                 "low_confidence_pct": low_conf / total if total > 0 else 0,
             })
 
+    def compute_reduction_ratio(self, num_entities: int, candidate_pairs: int):
+        """
+        Compute Reduction Ratio (RR) - blocking efficiency metric.
+
+        RR measures how much the blocking step reduced the comparison space:
+        RR = 1 - |C| / |P|
+
+        Where:
+        - C = number of candidate pairs (after blocking)
+        - P = total possible pairs = n(n-1)/2
+        - RR close to 1 = very effective blocking (reduced many comparisons)
+        - RR close to 0 = ineffective blocking (still many comparisons)
+
+        Reference: BlockingPy documentation
+        https://blockingpy.readthedocs.io/en/latest/metrics.html
+
+        Args:
+            num_entities: Total number of entities
+            candidate_pairs: Number of candidate pairs after blocking
+        """
+        if num_entities <= 1:
+            logger.warning("Cannot compute RR with <= 1 entity")
+            return
+
+        # Total possible pairs = n(n-1)/2
+        total_possible_pairs = num_entities * (num_entities - 1) // 2
+
+        # Reduction ratio
+        if total_possible_pairs > 0:
+            reduction_ratio = 1.0 - (candidate_pairs / total_possible_pairs)
+        else:
+            reduction_ratio = 0.0
+
+        self.blocking_metrics.update({
+            "reduction_ratio": reduction_ratio,
+            "reduction_ratio_pct": f"{reduction_ratio * 100:.2f}%",
+            "candidate_pairs": candidate_pairs,
+            "total_possible_pairs": total_possible_pairs,
+        })
+
+        logger.info(
+            f"Reduction Ratio: {reduction_ratio:.4f} "
+            f"({candidate_pairs:,} / {total_possible_pairs:,} pairs)"
+        )
+
+    def compute_score_margins(self, entity_scores: Dict[str, List[float]]):
+        """
+        Compute Score Margin (Δ) for each entity.
+
+        Score margin measures the confidence gap between top-1 and top-2 matches:
+        Δ(entity) = score_1 - score_2
+
+        High margin (e.g., Δ >= 0.20) indicates confident, unambiguous matching.
+        Low margin (e.g., Δ < 0.10) indicates ambiguous cases requiring review.
+
+        Reference: ER-Evaluation framework, BlockingPy metrics
+        https://blockingpy.readthedocs.io/en/latest/metrics.html
+
+        Args:
+            entity_scores: Dictionary mapping entity -> list of candidate scores
+                          (sorted descending, top-1 first)
+        """
+        margins = []
+        high_margin_threshold = 0.20
+
+        for entity_id, scores in entity_scores.items():
+            if len(scores) >= 2:
+                # Ensure sorted descending
+                sorted_scores = sorted(scores, reverse=True)
+                margin = sorted_scores[0] - sorted_scores[1]
+                margins.append(margin)
+
+        if not margins:
+            logger.warning("No entities with >= 2 candidates for margin calculation")
+            return
+
+        self._score_margins = margins
+
+        # Compute statistics
+        mean_margin = float(np.mean(margins))
+        median_margin = float(np.median(margins))
+        min_margin = float(np.min(margins))
+        max_margin = float(np.max(margins))
+        high_margin_count = sum(1 for m in margins if m >= high_margin_threshold)
+
+        self.score_margin_metrics.update({
+            "mean_margin": mean_margin,
+            "median_margin": median_margin,
+            "min_margin": min_margin,
+            "max_margin": max_margin,
+            "entities_with_margin": len(margins),
+            "high_margin_count": high_margin_count,
+            "high_margin_pct": high_margin_count / len(margins) if margins else 0.0,
+        })
+
+        logger.info(
+            f"Score Margin: mean={mean_margin:.3f}, median={median_margin:.3f}, "
+            f"high_margin%={high_margin_count / len(margins) * 100:.1f}%"
+        )
+
     def analyze_clusters(self, graph: Dict[Tuple[str, str], str]):
         """
         Analyze entity clusters from the graph structure.
@@ -405,9 +527,11 @@ class EntityResolutionMetrics:
             "openie_extraction": self.openie_metrics,
             "entity_statistics": self.entity_metrics,
             "entity_linking": self.linking_metrics,
+            "blocking_efficiency": self.blocking_metrics,  # Phase A addition
             "cluster_analysis": self.cluster_metrics,
             "coverage": self.coverage_metrics,
             "score_distribution": self.score_distribution,
+            "score_margin": self.score_margin_metrics,  # Phase A addition
             "graph_structure": self.graph_metrics,
             "efficiency": self.efficiency_metrics,
         }
@@ -499,8 +623,50 @@ class EntityResolutionMetrics:
             f.write(f"Linking Time:                    {self.linking_metrics['linking_time']:.2f}s\n")
             f.write("\n")
 
+            # Blocking Efficiency (Phase A addition)
+            f.write("4. BLOCKING EFFICIENCY (Phase A)\n")
+            f.write("-" * 80 + "\n")
+            if self.blocking_metrics['total_possible_pairs'] > 0:
+                f.write(f"Reduction Ratio (RR):            {self.blocking_metrics['reduction_ratio']:.4f} ")
+                f.write(f"({self.blocking_metrics['reduction_ratio_pct']})\n")
+                f.write(f"Candidate Pairs:                 {self.blocking_metrics['candidate_pairs']:,}\n")
+                f.write(f"Total Possible Pairs:            {self.blocking_metrics['total_possible_pairs']:,}\n")
+                f.write(f"Interpretation:                  RR={self.blocking_metrics['reduction_ratio']:.4f} → ")
+                if self.blocking_metrics['reduction_ratio'] >= 0.999:
+                    f.write("Excellent blocking (>99.9% reduction)\n")
+                elif self.blocking_metrics['reduction_ratio'] >= 0.99:
+                    f.write("Very good blocking (>99% reduction)\n")
+                elif self.blocking_metrics['reduction_ratio'] >= 0.95:
+                    f.write("Good blocking (>95% reduction)\n")
+                else:
+                    f.write("Moderate blocking (<95% reduction)\n")
+            else:
+                f.write("No blocking metrics available\n")
+            f.write("\n")
+
+            # Score Margin (Phase A addition)
+            f.write("5. SCORE MARGIN ANALYSIS (Phase A)\n")
+            f.write("-" * 80 + "\n")
+            if self._score_margins:
+                f.write(f"Entities with ≥2 Candidates:     {self.score_margin_metrics['entities_with_margin']}\n")
+                f.write(f"Mean Score Margin (Δ):           {self.score_margin_metrics['mean_margin']:.3f}\n")
+                f.write(f"Median Score Margin:             {self.score_margin_metrics['median_margin']:.3f}\n")
+                f.write(f"Margin Range:                    [{self.score_margin_metrics['min_margin']:.3f}, {self.score_margin_metrics['max_margin']:.3f}]\n")
+                f.write(f"High Margin (Δ≥0.20):            {self.score_margin_metrics['high_margin_count']} ")
+                f.write(f"({self.score_margin_metrics['high_margin_pct']:.1%})\n")
+                f.write(f"Interpretation:                  Mean Δ={self.score_margin_metrics['mean_margin']:.3f} → ")
+                if self.score_margin_metrics['mean_margin'] >= 0.20:
+                    f.write("Confident matches (high margin)\n")
+                elif self.score_margin_metrics['mean_margin'] >= 0.10:
+                    f.write("Moderate confidence\n")
+                else:
+                    f.write("Ambiguous matches (low margin, needs review)\n")
+            else:
+                f.write("No score margin data available\n")
+            f.write("\n")
+
             # Cluster Analysis
-            f.write("4. CLUSTER ANALYSIS\n")
+            f.write("6. CLUSTER ANALYSIS\n")
             f.write("-" * 80 + "\n")
             f.write(f"Number of Clusters:              {self.cluster_metrics['num_clusters']}\n")
             f.write(f"Singletons (no synonyms):        {self.cluster_metrics['num_singletons']}\n")
@@ -510,7 +676,7 @@ class EntityResolutionMetrics:
             f.write("\n")
 
             # Coverage
-            f.write("5. COVERAGE METRICS\n")
+            f.write("7. COVERAGE METRICS\n")
             f.write("-" * 80 + "\n")
             f.write(f"Entities with Synonyms:          {self.coverage_metrics['entities_with_synonyms']}\n")
             f.write(f"Entities without Synonyms:       {self.coverage_metrics['entities_without_synonyms']}\n")
@@ -518,7 +684,7 @@ class EntityResolutionMetrics:
             f.write("\n")
 
             # Score Distribution
-            f.write("6. SIMILARITY SCORE DISTRIBUTION\n")
+            f.write("8. SIMILARITY SCORE DISTRIBUTION\n")
             f.write("-" * 80 + "\n")
             f.write(f"High Confidence (≥0.9):          {self.score_distribution['high_confidence']} ")
             f.write(f"({self.score_distribution['high_confidence_pct']:.1%})\n")
@@ -529,7 +695,7 @@ class EntityResolutionMetrics:
             f.write("\n")
 
             # Graph Structure
-            f.write("7. GRAPH STRUCTURE\n")
+            f.write("9. GRAPH STRUCTURE\n")
             f.write("-" * 80 + "\n")
             f.write(f"Total Edges:                     {self.graph_metrics['total_edges']}\n")
             f.write(f"Synonymy Edges:                  {self.graph_metrics['synonymy_edges']}\n")
@@ -538,7 +704,7 @@ class EntityResolutionMetrics:
             f.write("\n")
 
             # Efficiency
-            f.write("8. EFFICIENCY METRICS\n")
+            f.write("10. EFFICIENCY METRICS\n")
             f.write("-" * 80 + "\n")
             f.write(f"Total Time:                      {self.efficiency_metrics['total_time']:.2f}s\n")
             f.write(f"  - OpenIE:                      {self.efficiency_metrics['openie_time']:.2f}s\n")
