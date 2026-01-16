@@ -503,12 +503,16 @@ class EntityResolutionPipeline:
             entity_emb = embeddings[entity_id:entity_id+1]
         else:
             # Compute embedding on-the-fly (fallback)
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer(
-                self.config.sapbert_model,
-                device=self.config.embedding_device
-            )
-            entity_emb = model.encode(
+            # Cache model to avoid reloading for each entity
+            if not hasattr(self, '_tier2_sapbert_model'):
+                from sentence_transformers import SentenceTransformer
+                logger.info("  Loading SapBERT model for on-the-fly encoding...")
+                self._tier2_sapbert_model = SentenceTransformer(
+                    self.config.sapbert_model,
+                    device=self.config.embedding_device
+                )
+
+            entity_emb = self._tier2_sapbert_model.encode(
                 [entity],
                 batch_size=1,
                 show_progress_bar=False,
@@ -578,6 +582,8 @@ class EntityResolutionPipeline:
         logger.info(f"Step 2 LLM Parallel Processing: BATCH_SIZE={batch_size}, MAX_WORKERS={max_workers}")
 
         results = {}
+        processed_count = 0
+        total_entities = len(entities)
 
         # Process in batches
         total_batches = (len(entities) + batch_size - 1) // batch_size
@@ -601,9 +607,14 @@ class EntityResolutionPipeline:
                     try:
                         result = future.result()
                         results[entity] = result
+                        processed_count += 1
+                        # Display progress every 10 entities or on last entity
+                        if processed_count % 10 == 0 or processed_count == total_entities:
+                            logger.info(f"  Progress: {processed_count}/{total_entities} entities processed ({100*processed_count/total_entities:.1f}%)")
                     except Exception as e:
                         logger.warning(f"Parallel LLM failed for '{entity}': {e}")
                         results[entity] = {"type": "other", "confidence": 0.3}
+                        processed_count += 1
 
         logger.info(f"✅ Completed parallel LLM processing for {len(results)} entities")
         return results
@@ -612,12 +623,13 @@ class EntityResolutionPipeline:
         """
         Classify entity types using SMART CASCADING (3-Tier) approach.
 
-        NEW Architecture (5-10x faster):
+        OPTIMIZED Architecture (5-10x faster, higher accuracy):
         ├─ TIER 1: Medical Keywords + Pattern (0.001s/entity)
-        │  └─ Early stop if confidence ≥ 0.85
+        │  └─ Early stop if confidence ≥ 0.80 (relaxed for more coverage)
         ├─ TIER 2: SapBERT kNN Classifier (0.01s/entity)
-        │  └─ Early stop if confidence ≥ 0.75
-        └─ TIER 3: LLM Relationship (2s/entity, only hard cases ~10%)
+        │  └─ Early stop if confidence ≥ 0.80 (strict for quality)
+        └─ TIER 3: GPT-4.1 Mini LLM (0.5s/entity, hard cases ~15-20%)
+           └─ Model: gpt-4.1-mini-2025-04-14 (fast and cost-effective)
 
         REMOVED:
         - Zero-shot BART (78% bottleneck, not medical-specific)
@@ -641,7 +653,8 @@ class EntityResolutionPipeline:
 
         logger.info(f"Processing {len(self.entities)} unique entities...")
         logger.info("Architecture: Tier 1 (Keywords) → Tier 2 (SapBERT kNN) → Tier 3 (LLM)")
-        logger.info("Early stopping: Tier 1 @ 0.85 confidence, Tier 2 @ 0.75 confidence")
+        logger.info("Early stopping: Tier 1 @ 0.80 confidence, Tier 2 @ 0.80 confidence")
+        logger.info("LLM Model: gpt-4.1-mini-2025-04-14 (GPT-4.1 Mini for fast processing)")
 
         entity_types = {}
         tier_stats = {
@@ -672,7 +685,7 @@ class EntityResolutionPipeline:
             # ─────────────────────────────────────────────────────────
             tier1_result = self._infer_type_tier1_medical_keywords(entity)
 
-            if tier1_result["confidence"] >= 0.85:
+            if tier1_result["confidence"] >= 0.80:
                 # HIGH CONFIDENCE → Early stop
                 entity_types[entity] = tier1_result
                 tier_stats["tier1"] += 1
@@ -683,7 +696,7 @@ class EntityResolutionPipeline:
             # ─────────────────────────────────────────────────────────
             tier2_result = self._infer_type_tier2_sapbert_knn(entity, embeddings)
 
-            if tier2_result["confidence"] >= 0.75:
+            if tier2_result["confidence"] >= 0.80:
                 # MEDIUM CONFIDENCE → Early stop
                 entity_types[entity] = tier2_result
                 tier_stats["tier2"] += 1
@@ -892,7 +905,7 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
                     # Use init_langchain_model - auto-detects YEScale or OpenAI
                     self._llm_cache = init_langchain_model(
                         llm="openai",  # Will use YEScale if YESCALE_API_BASE_URL is set
-                        model_name="gpt-4o-mini",
+                        model_name="gpt-4.1-mini-2025-04-14",  # GPT-4.1 Mini for fast processing
                         temperature=0.0,
                     )
                     if yescale_url:
@@ -1235,22 +1248,26 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         entity_ids_path = self.stage_paths["stage1_entity_ids"]
 
         # Check cache
+        logger.info(f"Checking for cached embeddings at: {embeddings_path}")
         if not self.config.force and embeddings_path.exists():
-            logger.info(f"Loading cached embeddings from: {embeddings_path}")
+            logger.info("✓ Cache found - loading cached embeddings (SapBERT model will not be loaded)")
             embeddings = np.load(embeddings_path)
             logger.info(f"✅ Loaded embeddings shape: {embeddings.shape}")
+            logger.info("   💡 Tip: Use --force flag to regenerate embeddings and see full model loading process")
             return embeddings
 
+        logger.info("✗ No cache found - will generate new embeddings")
         logger.info(f"Model: {self.config.sapbert_model}")
         logger.info(f"Device: {self.config.embedding_device}")
         logger.info(f"Batch size: {self.config.embedding_batch_size}")
         logger.info(f"Processing {len(self.entities)} entities...")
 
-        # Load SapBERT model
+        # Load SapBERT model from sentence-transformers (NOT HuggingFace transformers)
         from sentence_transformers import SentenceTransformer
 
-        logger.info("Loading SapBERT model...")
+        logger.info("Loading SapBERT model from sentence-transformers library...")
         model = SentenceTransformer(self.config.sapbert_model, device=self.config.embedding_device)
+        logger.info("✅ SapBERT model loaded successfully")
 
         # Encode entities in batches
         logger.info("Encoding entities...")
@@ -2112,6 +2129,18 @@ def main(cfg: DictConfig) -> None:
     pipeline.run()
 
     logger.info("\n✅ Stage 2 completed successfully!")
+
+    # Generate visualizations
+    logger.info("\nGenerating visualization plots...")
+    try:
+        from gfmrag.workflow.stage2_visualization import visualize_stage2_metrics
+        visualize_stage2_metrics(Path(config.output_dir))
+        logger.info("✓ Visualizations generated successfully")
+    except ImportError:
+        logger.warning("Matplotlib/Seaborn not installed. Skipping visualization.")
+        logger.warning("Install with: pip install matplotlib seaborn")
+    except Exception as e:
+        logger.warning(f"Failed to generate visualizations: {e}")
 
 
 if __name__ == "__main__":

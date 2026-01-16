@@ -1,0 +1,359 @@
+================================================================================
+STAGE 3 UMLS MAPPING - ARCHITECTURE DIAGRAM
+================================================================================
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│                       FULL WORKFLOW OVERVIEW                                │
+└────────────────────────────────────────────────────────────────────────────┘
+
+   Stage 0: Type Inference
+   ┌──────────────────────────────────────┐
+   │  Input: Raw entities                 │
+   │  Process: 3-Tier Cascading           │
+   │    ├─ Tier 1: Medical Keywords       │
+   │    ├─ Tier 2: SapBERT kNN            │
+   │    └─ Tier 3: GPT-4 Turbo            │
+   │  Output: Typed entities              │
+   └──────────────────────────────────────┘
+                   ↓
+   Stage 1: Synonym Resolution
+   ┌──────────────────────────────────────┐
+   │  Input: Typed entities               │
+   │  Process: String norm + Clustering   │
+   │  Output: Synonym clusters            │
+   └──────────────────────────────────────┘
+                   ↓
+   Stage 2: Entity Resolution
+   ┌──────────────────────────────────────┐
+   │  Input: Synonym clusters             │
+   │  Process: Multi-feature scoring      │
+   │    ├─ Edit distance                  │
+   │    ├─ Embeddings similarity          │
+   │    └─ ColBERT token similarity       │
+   │  Output: kg_clean.txt                │
+   └──────────────────────────────────────┘
+                   ↓
+   ╔══════════════════════════════════════╗
+   ║  Stage 3: UMLS Mapping (THIS!)       ║
+   ║                                      ║
+   ║  Input: kg_clean.txt + clusters      ║
+   ║  Process: 6-stage pipeline (below)   ║
+   ║  Output: Entity → CUI mappings       ║
+   ╚══════════════════════════════════════╝
+                   ↓
+   Final KG
+   ┌──────────────────────────────────────┐
+   │  kg_clean.txt                        │
+   │  + umls_mapping_triples.txt          │
+   │  = kg_final.txt (with UMLS links)    │
+   └──────────────────────────────────────┘
+
+================================================================================
+STAGE 3: 6-STAGE PIPELINE DETAILED
+================================================================================
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.0: UMLS Data Loading & Indexing                                    │
+│ File: umls_loader.py (328 lines)                                           │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Input: UMLS RRF Files                  Output: UMLS Indices                │
+│  ┌──────────────────┐                   ┌───────────────────┐              │
+│  │ MRCONSO.RRF      │──Parse──>         │ CUI → Concept     │              │
+│  │ (~5GB, 15M rows) │                   │ (~4.5M concepts)  │              │
+│  └──────────────────┘                   └───────────────────┘              │
+│  ┌──────────────────┐                   ┌───────────────────┐              │
+│  │ MRSTY.RRF        │──Parse──>         │ CUI → Sem Types   │              │
+│  │ (~100MB)         │                   │ (127 types)       │              │
+│  └──────────────────┘                   └───────────────────┘              │
+│  ┌──────────────────┐                   ┌───────────────────┐              │
+│  │ MRDEF.RRF        │──Parse──>         │ CUI → Definitions │              │
+│  │ (~500MB)         │                   │ (optional)        │              │
+│  └──────────────────┘                   └───────────────────┘              │
+│                                                                             │
+│  Cache: data/umls/processed/ (~500MB)                                      │
+│  ⏱️  Time: 30-60 min (first run), 1 min (cached)                            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.1: Preprocessing & Entity Extraction                               │
+│ File: preprocessor.py (254 lines)                                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Input: kg_clean.txt                    Output: Preprocessed Entities      │
+│  ┌──────────────────────┐               ┌────────────────────┐             │
+│  │ diabetes mellitus    │──Normalize─>  │ diabetes mellitus  │             │
+│  │ Diabetes Mellitus    │               │ ├─ normalized      │             │
+│  │ DM                   │──Cluster──>   │ ├─ type: disease   │             │
+│  │ diabetes             │               │ └─ cluster: [DM,   │             │
+│  └──────────────────────┘               │     diabetes]      │             │
+│                                         └────────────────────┘             │
+│                                                                             │
+│  Process:                                                                   │
+│  ├─ Extract entities from triples (entity1, entity2 from "e1 | r | e2")    │
+│  ├─ Normalize: lowercase, remove punct, whitespace                         │
+│  ├─ Expand abbreviations (DM → diabetes mellitus)                          │
+│  └─ Link to synonym clusters from Stage 1                                  │
+│                                                                             │
+│  ⏱️  Time: ~0.5 min (500 entities)                                          │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.2: Candidate Generation (Ensemble)                                 │
+│ File: candidate_generator.py (336 lines)                                   │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Method A: SapBERT (Semantic)           Method B: TF-IDF (Character)       │
+│  ┌────────────────────────┐             ┌─────────────────────────┐        │
+│  │ Query: "diabetes"      │             │ Query: "diabetes"       │        │
+│  │ ↓ Encode (SapBERT)     │             │ ↓ Char trigrams         │        │
+│  │ [0.23, -0.15, ...]     │             │ ["dia", "iab", "abe"]   │        │
+│  │ ↓ FAISS Search         │             │ ↓ TF-IDF Search         │        │
+│  │ Top 64 Candidates      │             │ Top 64 Candidates       │        │
+│  └────────────────────────┘             └─────────────────────────┘        │
+│                  ↓                                    ↓                     │
+│                  └────────────┬───────────────────────┘                     │
+│                               ↓                                             │
+│                  ┌────────────────────────┐                                 │
+│                  │ Reciprocal Rank Fusion │                                 │
+│                  │ (RRF Ensemble)         │                                 │
+│                  │ ├─ Combine rankings    │                                 │
+│                  │ ├─ Diversity bonus     │                                 │
+│                  │ └─ Top 128 Candidates  │                                 │
+│                  └────────────────────────┘                                 │
+│                                                                             │
+│  Output: 128 candidate CUIs per entity                                     │
+│  Cache: SapBERT embeddings (~12GB), TF-IDF index (~2GB)                    │
+│  ⏱️  Time: 2-3 hours (first run), 2-3 min (cached)                          │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.3: Synonym Cluster Aggregation                                     │
+│ File: cluster_aggregator.py (178 lines)                                    │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Input: Entity Candidates             Output: Aggregated Candidates        │
+│  ┌─────────────────────────┐          ┌──────────────────────────┐         │
+│  │ "diabetes mellitus":    │          │ Cluster consensus:       │         │
+│  │   C0011849 (0.92)       │          │   C0011849 (0.95) ✓      │         │
+│  │   C0011854 (0.75)       │          │   C0011854 (0.42)        │         │
+│  │                         │───Agg──> │                          │         │
+│  │ "diabetes": (cluster)   │          │ Scoring:                 │         │
+│  │   C0011849 (0.88)       │          │   60% avg score          │         │
+│  │   C0011850 (0.65)       │          │   30% cluster consensus  │         │
+│  │                         │          │   10% method diversity   │         │
+│  │ "DM": (cluster)         │          │                          │         │
+│  │   C0011849 (0.85)       │          │ Outlier detection:       │         │
+│  │   C0027051 (0.80) ⚠️     │          │   "DM" → C0027051 = MI   │         │
+│  └─────────────────────────┘          │   (outlier, filtered)    │         │
+│                                       └──────────────────────────┘         │
+│                                                                             │
+│  Output: 64 refined candidates per entity                                  │
+│  ⏱️  Time: ~0.5 min                                                          │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.4: Hard Negative Filtering                                         │
+│ File: hard_negative_filter.py (229 lines)                                  │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Process 1: Semantic Type Checking                                         │
+│  ┌────────────────────────────────────────────────────────┐                │
+│  │ Entity: "metformin" (type: drug)                       │                │
+│  │ Candidates:                                            │                │
+│  │   C0025598: "Metformin"                                │                │
+│  │      └─ Semantic Type: Pharmacologic Substance ✓       │                │
+│  │   C1234567: "Metformin Study Protocol"                 │                │
+│  │      └─ Semantic Type: Research Activity ✗ (filtered)  │                │
+│  └────────────────────────────────────────────────────────┘                │
+│                                                                             │
+│  Process 2: Hard Negative Detection                                        │
+│  ┌────────────────────────────────────────────────────────┐                │
+│  │ Query: "MS"                                            │                │
+│  │ Candidates:                                            │                │
+│  │   C0026769: "Multiple Sclerosis" (0.85)                │                │
+│  │   C0026271: "Mitral Stenosis" (0.82)                   │                │
+│  │      └─ Hard negative! (same abbrev, different meaning)│                │
+│  │      └─ Penalty: -0.1                                  │                │
+│  └────────────────────────────────────────────────────────┘                │
+│                                                                             │
+│  Output: 32 filtered candidates per entity                                 │
+│  ⏱️  Time: ~1 min                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.5: Cross-Encoder Reranking                                         │
+│ File: cross_encoder_reranker.py (194 lines)                                │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Model: microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext     │
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────┐                │
+│  │ Input Pair:                                            │                │
+│  │   [CLS] diabetes [SEP] Diabetes Mellitus [SEP]         │                │
+│  │          ↓ Full attention ↓                            │                │
+│  │   Cross-Encoder Score: 0.94                            │                │
+│  │                                                        │                │
+│  │ Combined Score:                                        │                │
+│  │   = 0.7 × cross_encoder + 0.3 × previous_stage         │                │
+│  │   = 0.7 × 0.94 + 0.3 × 0.85                            │                │
+│  │   = 0.913                                              │                │
+│  └────────────────────────────────────────────────────────┘                │
+│                                                                             │
+│  More accurate than bi-encoder but slower                                  │
+│  Output: Re-ranked candidates with refined scores                          │
+│  ⏱️  Time: 2-3 min (500 entities, batch 32)                                 │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Stage 3.6: Confidence Scoring & Graph Propagation                          │
+│ File: confidence_propagator.py (273 lines)                                 │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: Multi-Factor Confidence                                           │
+│  ┌────────────────────────────────────────────────────────┐                │
+│  │ Entity: "diabetes mellitus"                           │                │
+│  │ Top candidates:                                        │                │
+│  │   #1: C0011849 (score: 0.92)                           │                │
+│  │   #2: C0011854 (score: 0.78)                           │                │
+│  │                                                        │                │
+│  │ Confidence Factors:                                    │                │
+│  │   ├─ Score margin: (0.92 - 0.78) = 0.14  → 35%        │                │
+│  │   ├─ Absolute score: 0.92             → 25%           │                │
+│  │   ├─ Cluster consensus: 0.95          → 25%           │                │
+│  │   └─ Method agreement: 1.0            → 15%           │                │
+│  │                                                        │                │
+│  │ Final Confidence: 0.89 → Tier: HIGH ✓                 │                │
+│  └────────────────────────────────────────────────────────┘                │
+│                                                                             │
+│  Step 2: Graph Propagation                                                 │
+│  ┌────────────────────────────────────────────────────────┐                │
+│  │ Cluster: ["diabetes mellitus", "diabetes", "DM"]      │                │
+│  │                                                        │                │
+│  │ "diabetes mellitus" → C0011849 (conf: 0.89) HIGH ✓    │                │
+│  │ "diabetes"          → C0011849 (conf: 0.82) HIGH ✓    │                │
+│  │ "DM"                → C0011849 (conf: 0.65) MEDIUM     │                │
+│  │                                                        │                │
+│  │ Cluster agreement: 3/3 = 100% ≥ 80% threshold         │                │
+│  │                                                        │                │
+│  │ Propagate to "DM":                                     │                │
+│  │   New confidence = 0.89 × 0.9 (penalty) = 0.80 → HIGH │                │
+│  │   "DM" → C0011849 (propagated) ✓                       │                │
+│  └────────────────────────────────────────────────────────┘                │
+│                                                                             │
+│  Output: Final mappings with tiers (High/Medium/Low)                       │
+│  ⏱️  Time: ~0.5 min                                                          │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Final Outputs                                                               │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│ 1. final_umls_mappings.json                                                │
+│    {                                                                        │
+│      "diabetes mellitus": {                                                │
+│        "cui": "C0011849",                                                  │
+│        "name": "Diabetes Mellitus",                                        │
+│        "confidence": 0.89,                                                 │
+│        "tier": "high",                                                     │
+│        "alternatives": [...],                                              │
+│        "cluster_size": 3,                                                  │
+│        "is_propagated": false                                              │
+│      }                                                                      │
+│    }                                                                        │
+│                                                                             │
+│ 2. umls_mapping_triples.txt                                                │
+│    diabetes mellitus|mapped_to_cui|C0011849                                │
+│    metformin|mapped_to_cui|C0025598                                        │
+│    hypertension|mapped_to_cui|C0020538                                     │
+│                                                                             │
+│ 3. mapping_statistics.json                                                 │
+│    {                                                                        │
+│      "total_entities": 1250,                                               │
+│      "high_confidence": 875,      # 70%                                    │
+│      "medium_confidence": 280,    # 22%                                    │
+│      "low_confidence": 95         # 8%                                     │
+│    }                                                                        │
+│                                                                             │
+│ 4. manual_review_queue.json                                                │
+│    [Low/medium confidence entities requiring human review]                 │
+│                                                                             │
+│ 5. pipeline_metrics.json                                                   │
+│    [Stage-by-stage metrics, timing, warnings]                              │
+│                                                                             │
+│ 6. visualizations/                                                         │
+│    ├─ stage_durations.png                                                  │
+│    ├─ confidence_distribution.png                                          │
+│    ├─ candidate_funnel.png                                                 │
+│    └─ semantic_type_breakdown.png                                          │
+└────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+KEY INNOVATIONS
+================================================================================
+
+1. Hybrid Ensemble (SapBERT + TF-IDF)
+   ├─ SapBERT: Catches semantic variants
+   │   Example: "heart attack" → "myocardial infarction"
+   └─ TF-IDF: Catches spelling variants
+       Example: "leukemia" → "leukaemia"
+
+2. Synonym Cluster Propagation
+   ├─ Leverage synonym groups from Stage 1
+   ├─ Propagate high-confidence mappings
+   └─ Save cross-encoder computation
+
+3. Hard Negative Filtering
+   ├─ Detect confusing concepts
+   │   Example: "MS" → Multiple Sclerosis vs Mitral Stenosis
+   └─ Semantic type validation
+
+4. Multi-Factor Confidence
+   ├─ Not just score, but:
+   │   ├─ Score margin (gap between top-1 and top-2)
+   │   ├─ Absolute score
+   │   ├─ Cluster consensus
+   │   └─ Method agreement
+   └─ More robust than single metric
+
+5. Production-Ready
+   ├─ Comprehensive caching (UMLS, embeddings, indices)
+   ├─ Incremental processing
+   ├─ Detailed metrics & visualization
+   └─ Manual review queue
+
+================================================================================
+PERFORMANCE SUMMARY
+================================================================================
+
+First Run (one-time setup):
+  Stage 3.0: UMLS Loading         ~30-60 min
+           + SapBERT embeddings   ~2-3 hours
+           + TF-IDF index         ~30 min
+           + FAISS index          ~30 min
+  Total:                          ~4-5 hours
+
+Subsequent Runs (with cache):
+  Stage 3.0: Load UMLS            ~1 min
+  Stage 3.1: Preprocessing        ~0.5 min
+  Stage 3.2: Candidate Gen        ~2-3 min
+  Stage 3.3: Cluster Agg          ~0.5 min
+  Stage 3.4: Hard Neg Filter      ~1 min
+  Stage 3.5: Cross-Encoder        ~2-3 min
+  Stage 3.6: Confidence           ~0.5 min
+  Total:                          ~8-12 min (500-1000 entities)
+
+Accuracy (expected):
+  High conf (≥0.75):  90-95% accuracy, 60-80% of entities
+  Medium conf:        75-85% accuracy, 15-30% of entities
+  Low conf:           40-60% accuracy, 5-10% of entities
+  Overall Top-1:      85-92%
+
+Resources:
+  GPU Memory: 8-12GB
+  Disk Space: ~25GB (cache)
+  RAM:        16GB+
+
+================================================================================
+END OF ARCHITECTURE DIAGRAM
+================================================================================

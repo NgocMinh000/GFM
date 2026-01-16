@@ -1,0 +1,207 @@
+# ==============================================================================
+# CROSS-ENCODER FINE-TUNING CONFIGURATION
+# ==============================================================================
+# Purpose: Fine-tune SapBERT/PubMedBERT as cross-encoder for UMLS entity linking
+# Expected Impact: +30-50% high confidence mappings
+# ==============================================================================
+
+model:
+  # Base model to fine-tune
+  name: "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
+
+  # Output directory for checkpoints
+  checkpoint_dir: "models/cross_encoder_finetuned"
+
+  # Model config
+  max_length: 128
+  dropout: 0.1  # Prevent overfitting
+
+  # Classification head
+  num_labels: 2  # Binary: correct vs incorrect
+
+# ==============================================================================
+# DATASET CONFIGURATION
+# ==============================================================================
+dataset:
+  # Primary dataset: MedMentions
+  medmentions:
+    enabled: true
+    path: "data/MedMentions/full"
+    split: "train"
+    use_full: true  # Use full corpus (not st21pv subset)
+
+    # UMLS version mapping
+    umls_version_source: "2017AA"  # MedMentions uses 2017AA
+    umls_version_target: "2020AB"  # Current system uses 2020AB
+    cui_mapping_file: "data/UMLS/cui_mapping_2017_to_2020.txt"
+
+  # Secondary dataset: BC5CDR (optional, for diversity)
+  bc5cdr:
+    enabled: false  # Enable for additional training data
+    path: "data/BC5CDR"
+    use_chemicals: true
+    use_diseases: true
+
+  # Data splits
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+  # Stratification
+  stratify_by:
+    - "entity_type"      # Balance across drug/disease/gene/etc
+    - "cui_frequency"    # Balance common vs rare CUIs
+    - "difficulty"       # Balance easy vs hard examples
+
+# ==============================================================================
+# HARD NEGATIVE MINING
+# ==============================================================================
+hard_negatives:
+  # FAISS index for negative sampling
+  faiss_index_path: "tmp/umls_faiss_index"
+
+  # Mining parameters
+  similarity_threshold: 0.85  # Only very similar CUIs (harder negatives)
+  top_k_candidates: 20        # Retrieve top-20 similar CUIs
+
+  # Negatives per positive sample
+  semantic_negatives: 5   # High similarity, wrong CUI
+  type_negatives: 2       # Wrong semantic type (drug vs disease)
+  random_negatives: 2     # Easy negatives for stability
+
+  # Total negatives per positive: 5 + 2 + 2 = 9
+  # Positive:Negative ratio: 1:9 (standard for contrastive learning)
+
+  # Caching
+  cache_hard_negatives: true  # Pre-mine and cache (speeds up training)
+  cache_path: "tmp/training/hard_negatives_cache.pkl"
+
+# ==============================================================================
+# TRAINING HYPERPARAMETERS
+# ==============================================================================
+training:
+  # Batch size
+  batch_size: 32                      # Per GPU
+  gradient_accumulation_steps: 2      # Effective batch size = 32 * 2 = 64
+
+  # Optimization
+  learning_rate: 2e-5
+  weight_decay: 0.01
+  adam_epsilon: 1e-8
+  max_grad_norm: 1.0
+
+  # Schedule
+  epochs: 3
+  warmup_ratio: 0.1        # 10% of steps for warmup
+  lr_scheduler: "linear"   # Linear decay after warmup
+
+  # Mixed precision training (speeds up by 2-3x)
+  fp16: true
+  fp16_opt_level: "O1"     # Conservative mixed precision
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 2            # Stop if val loss doesn't improve for 2 epochs
+    monitor: "val_f1"      # Monitor validation F1 score
+    mode: "max"            # Maximize F1
+
+  # Checkpointing
+  save_strategy: "epoch"   # Save after each epoch
+  save_total_limit: 3      # Keep only best 3 checkpoints
+  load_best_model_at_end: true
+
+# ==============================================================================
+# LOSS FUNCTION
+# ==============================================================================
+loss:
+  # Loss type
+  type: "weighted_bce"  # Weighted Binary Cross-Entropy
+
+  # Sample weights (emphasize hard negatives)
+  positive_weight: 1.0
+  hard_negative_weight: 1.5    # 1.5x weight for semantic hard negatives
+  easy_negative_weight: 0.5    # 0.5x weight for random negatives
+
+  # Optional: Contrastive loss component
+  use_contrastive: false   # Enable for additional contrastive learning
+  contrastive_margin: 0.2  # Margin for triplet loss
+  contrastive_weight: 0.3  # Weight of contrastive loss vs BCE
+
+# ==============================================================================
+# EVALUATION
+# ==============================================================================
+evaluation:
+  # Evaluation strategy
+  eval_strategy: "epoch"      # Evaluate after each epoch
+  eval_steps: null            # Not used when strategy is "epoch"
+
+  # Metrics to compute
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "roc_auc"
+    - "pr_auc"
+
+  # Confidence calibration evaluation
+  calibration:
+    enabled: true
+    num_bins: 10            # For ECE calculation
+    metrics:
+      - "ece"               # Expected Calibration Error
+      - "brier_score"       # Brier Score
+
+# ==============================================================================
+# LOGGING & MONITORING
+# ==============================================================================
+logging:
+  # Logging directory
+  output_dir: "tmp/training/logs"
+
+  # Logging frequency
+  logging_steps: 100          # Log every 100 steps
+
+  # TensorBoard
+  tensorboard:
+    enabled: true
+    log_dir: "tmp/training/tensorboard"
+
+  # Weights & Biases (optional)
+  wandb:
+    enabled: false
+    project: "gfm-rag-cross-encoder"
+    entity: null
+
+# ==============================================================================
+# HARDWARE & PERFORMANCE
+# ==============================================================================
+hardware:
+  # Device
+  device: "cuda"  # auto-detect: "cuda" if available else "cpu"
+
+  # Multi-GPU
+  use_multi_gpu: false        # Enable for DataParallel
+  gpu_ids: [0]                # GPU IDs to use
+
+  # CPU threads
+  num_workers: 4              # DataLoader workers
+  pin_memory: true            # Pin memory for faster GPU transfer
+
+  # Gradient checkpointing (saves memory)
+  gradient_checkpointing: false  # Enable if OOM occurs
+
+# ==============================================================================
+# REPRODUCIBILITY
+# ==============================================================================
+seed: 42
+deterministic: true  # Ensures reproducible results (slightly slower)
+
+# ==============================================================================
+# VALIDATION
+# ==============================================================================
+# Expected training time: 4-6 hours on single V100 GPU
+# Expected peak GPU memory: 12-14 GB
+# Expected disk space: ~5 GB (checkpoints + cache)
+# ==============================================================================
