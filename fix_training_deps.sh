@@ -25,6 +25,7 @@ pip install "transformers>=4.46.1" \
 echo ""
 echo "Step 3: Installing training dependencies..."
 pip install datasets>=2.14.0 \
+            "pyarrow>=12.0.0,<15.0.0" \
             tensorboard>=2.14.0 \
             scikit-learn>=1.3.0 \
             matplotlib>=3.7.0 \
