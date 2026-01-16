@@ -1,0 +1,108 @@
+# Production Configuration for Fine-Tuned Cross-Encoder
+# Use this config for production deployment
+
+# Model Configuration
+model:
+  # Fine-tuned model path (update after training)
+  finetuned_model_path: "models/cross_encoder_finetuned/checkpoint-best"
+
+  # Base model (used for tokenizer)
+  base_model: "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
+
+  # Model parameters
+  max_length: 128
+  dropout: 0.1
+  num_labels: 2
+
+# Calibration Configuration
+calibration:
+  enabled: true
+  calibrator_path: "models/calibration/platt_scaler.pkl"
+  method: "platt"  # Options: platt, temperature, isotonic
+
+# Adaptive Thresholds Configuration
+adaptive_thresholds:
+  enabled: true
+  threshold_tuner_path: "models/calibration/adaptive_tuner.pkl"
+  default_threshold: 0.5
+  min_samples_for_tuning: 100
+  objective: "f1"  # Options: f1, precision, recall
+
+# Inference Configuration
+inference:
+  device: "cuda"  # Options: cuda, cpu
+  batch_size: 32
+  use_fp16: true  # Mixed precision for faster inference
+
+  # Score combination weights
+  cross_encoder_weight: 0.8  # Weight for fine-tuned cross-encoder
+  previous_score_weight: 0.2  # Weight for previous stage scores
+
+  # Confidence tiers
+  high_confidence_threshold: 0.7  # Scores >= this are "high confidence"
+  low_confidence_threshold: 0.5   # Scores < this are "low confidence"
+
+# Stage 3 Pipeline Integration
+stage3:
+  # Use fine-tuned model instead of baseline
+  use_finetuned: true
+
+  # Fallback to baseline if fine-tuned model fails to load
+  fallback_to_baseline: true
+
+  # Return all candidates or only above threshold
+  return_all_candidates: false
+
+  # Minimum score margin for high confidence
+  min_score_margin: 0.2
+
+# Performance Configuration
+performance:
+  # Number of workers for data loading
+  num_workers: 4
+
+  # Pin memory for faster GPU transfer
+  pin_memory: true
+
+  # Cache predictions (for repeated queries)
+  enable_cache: false
+  cache_size: 10000
+
+# Logging Configuration
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+
+  # Log calibration statistics
+  log_calibration_stats: true
+
+  # Log per-type threshold usage
+  log_threshold_usage: true
+
+  # TensorBoard logging (optional)
+  tensorboard:
+    enabled: false
+    log_dir: "logs/production/tensorboard"
+
+# Monitoring Configuration
+monitoring:
+  # Track metrics
+  track_metrics: true
+
+  # Metrics to track
+  metrics:
+    - "high_confidence_percentage"
+    - "avg_cross_encoder_score"
+    - "avg_score_margin"
+    - "calibration_error"
+
+  # Alert thresholds
+  alerts:
+    high_confidence_min: 0.30  # Alert if < 30%
+    avg_score_min: 0.80        # Alert if < 0.80
+    calibration_error_max: 0.05  # Alert if > 0.05
+
+# Backup Configuration (for baseline fallback)
+baseline:
+  model: "cambridgeltl/SapBERT-from-PubMedBERT-fulltext"
+  device: "cuda"
+  batch_size: 32
