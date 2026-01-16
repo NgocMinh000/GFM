@@ -525,13 +525,11 @@ def main():
     medmentions_config = config["dataset"]["medmentions"]
     train_mentions, val_mentions, test_mentions = load_medmentions(
         data_path=medmentions_config["path"],
-        umls_loader=umls_loader,
         train_ratio=config["dataset"]["train_ratio"],
         val_ratio=config["dataset"]["val_ratio"],
         test_ratio=config["dataset"]["test_ratio"],
-        stratify=True,
-        cache_path="tmp/training/medmentions_splits.pkl",
-        random_state=seed,
+        cache_dir="tmp/training/data_splits",
+        force_reload=False,
     )
 
     logger.info(f"Train: {len(train_mentions):,}, Val: {len(val_mentions):,}, Test: {len(test_mentions):,}")
