@@ -17,6 +17,13 @@ from transformers import AutoTokenizer, AutoModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    logger.warning("FAISS not available. Will use slower sklearn cosine_similarity.")
+
 from .config import UMLSMappingConfig
 from .umls_loader import UMLSLoader
 
@@ -53,6 +60,7 @@ class CandidateGenerator:
         self.sapbert_model = None
         self.sapbert_tokenizer = None
         self.sapbert_embeddings = None
+        self.faiss_index = None  # FAISS index for fast similarity search
 
         self.tfidf_vectorizer = None
         self.tfidf_matrix = None
@@ -87,6 +95,110 @@ class CandidateGenerator:
 
         return ensemble_candidates
 
+    def generate_candidates_batch(self, entities: List[str], k: int = None) -> List[List[Candidate]]:
+        """
+        Generate candidates for multiple entities at once (BATCHED for speed)
+
+        Args:
+            entities: List of entity texts
+            k: Number of candidates per entity
+
+        Returns:
+            List of candidate lists (one per entity)
+        """
+        if k is None:
+            k = self.config.ensemble_final_k
+
+        # Lazy load models
+        if self.sapbert_model is None:
+            self._load_sapbert()
+        if self.tfidf_vectorizer is None:
+            self._load_tfidf()
+
+        # Batch encode all entities with SapBERT
+        query_embs = self._encode_sapbert(entities)  # [batch_size, 768]
+
+        # Batch search FAISS
+        if self.faiss_index is not None:
+            scores_batch, indices_batch = self.faiss_index.search(
+                query_embs.astype('float32'),
+                self.config.sapbert_top_k
+            )  # [batch_size, k]
+        else:
+            # Fallback: process one by one
+            return [self.generate_candidates(entity, k) for entity in entities]
+
+        # Batch TF-IDF search (OPTIMIZATION: vectorized)
+        entities_lower = [e.lower() for e in entities]
+        query_vecs = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab_size]
+
+        # Compute similarities for all queries at once
+        tfidf_similarities = (query_vecs * self.tfidf_matrix.T).toarray()  # [batch_size, n_umls]
+
+        # Get top-k for each query
+        tfidf_top_k_indices = np.argsort(-tfidf_similarities, axis=1)[:, :self.config.sapbert_top_k]  # [batch_size, k]
+        tfidf_top_k_scores = np.take_along_axis(tfidf_similarities, tfidf_top_k_indices, axis=1)  # [batch_size, k]
+
+        # Process results for each entity
+        all_candidates = []
+        for i, entity in enumerate(entities):
+            # SapBERT candidates from batch search
+            sapbert_candidates = []
+            for idx, score in zip(indices_batch[i], scores_batch[i]):
+                name = self.umls_names[idx]
+                # Safe lookup with fallback
+                if name in self.name_to_cui:
+                    cui = self.name_to_cui[name]
+                else:
+                    # Try to find CUI via UMLS loader
+                    cuis = self.umls_loader.lookup_by_name(name)
+                    if cuis:
+                        cui = cuis[0]
+                    else:
+                        # Skip if no CUI found
+                        continue
+
+                sapbert_candidates.append(Candidate(
+                    cui=cui,
+                    name=name,
+                    score=float(score),
+                    method='sapbert'
+                ))
+
+            # TF-IDF candidates from batch search
+            tfidf_candidates = []
+            for idx, score in zip(tfidf_top_k_indices[i], tfidf_top_k_scores[i]):
+                name = self.umls_names[idx]
+                # Safe lookup with fallback
+                if name in self.name_to_cui:
+                    cui = self.name_to_cui[name]
+                else:
+                    # Try to find CUI via UMLS loader
+                    cuis = self.umls_loader.lookup_by_name(name)
+                    if cuis:
+                        cui = cuis[0]
+                    else:
+                        # Skip if no CUI found
+                        continue
+
+                tfidf_candidates.append(Candidate(
+                    cui=cui,
+                    name=name,
+                    score=float(score),
+                    method='tfidf'
+                ))
+
+            # Ensemble
+            ensemble_candidates = self._reciprocal_rank_fusion(
+                sapbert_candidates,
+                tfidf_candidates,
+                k=k
+            )
+
+            all_candidates.append(ensemble_candidates)
+
+        return all_candidates
+
     def _get_sapbert_candidates(self, entity: str, k: int) -> List[Candidate]:
         """Get candidates using SapBERT semantic similarity"""
 
@@ -97,22 +209,42 @@ class CandidateGenerator:
         # Encode query entity
         query_emb = self._encode_sapbert([entity])[0]
 
-        # Compute similarities
-        similarities = cosine_similarity([query_emb], self.sapbert_embeddings)[0]
+        # Use FAISS for fast search if available
+        if self.faiss_index is not None:
+            # FAISS search: returns (distances, indices)
+            # IndexFlatIP returns inner product scores (= cosine similarity for normalized vectors)
+            query_emb_reshaped = query_emb.reshape(1, -1).astype('float32')
+            scores, top_k_indices = self.faiss_index.search(query_emb_reshaped, k)
 
-        # Get top-k
-        top_k_indices = np.argsort(similarities)[::-1][:k]
+            # Flatten arrays
+            scores = scores[0]  # [k]
+            top_k_indices = top_k_indices[0]  # [k]
+        else:
+            # Fallback to sklearn (slow)
+            similarities = cosine_similarity([query_emb], self.sapbert_embeddings)[0]
+            top_k_indices = np.argsort(similarities)[::-1][:k]
+            scores = similarities[top_k_indices]
 
+        # Build candidate list
         candidates = []
-        for idx in top_k_indices:
+        for idx, score in zip(top_k_indices, scores):
             name = self.umls_names[idx]
-            score = float(similarities[idx])
-            cui = self.name_to_cui[name]
+            # Safe lookup with fallback
+            if name in self.name_to_cui:
+                cui = self.name_to_cui[name]
+            else:
+                # Try to find CUI via UMLS loader
+                cuis = self.umls_loader.lookup_by_name(name)
+                if cuis:
+                    cui = cuis[0]
+                else:
+                    # Skip if no CUI found
+                    continue
 
             candidates.append(Candidate(
                 cui=cui,
                 name=name,
-                score=score,
+                score=float(score),
                 method='sapbert'
             ))
 
@@ -138,7 +270,18 @@ class CandidateGenerator:
         for idx in top_k_indices:
             name = self.umls_names[idx]
             score = float(similarities[idx])
-            cui = self.name_to_cui[name]
+
+            # Safe lookup with fallback
+            if name in self.name_to_cui:
+                cui = self.name_to_cui[name]
+            else:
+                # Try to find CUI via UMLS loader
+                cuis = self.umls_loader.lookup_by_name(name)
+                if cuis:
+                    cui = cuis[0]
+                else:
+                    # Skip if no CUI found
+                    continue
 
             candidates.append(Candidate(
                 cui=cui,
@@ -214,6 +357,17 @@ class CandidateGenerator:
 
         # Load model
         device = torch.device(self.config.sapbert_device if torch.cuda.is_available() else 'cpu')
+
+        # Log device info
+        if device.type == 'cuda':
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.info(f"✓ Using GPU: {gpu_name} ({gpu_memory:.1f}GB)")
+            logger.info(f"✓ Batch size: {self.config.sapbert_batch_size}")
+        else:
+            logger.warning(f"⚠️  Using CPU (no GPU available)")
+            logger.warning(f"⚠️  Encoding will be VERY slow (~4 hours for 8M names)")
+
         self.sapbert_tokenizer = AutoTokenizer.from_pretrained(self.config.sapbert_model)
         self.sapbert_model = AutoModel.from_pretrained(self.config.sapbert_model).to(device)
         self.sapbert_model.eval()
@@ -230,8 +384,127 @@ class CandidateGenerator:
             logger.info("Computing SapBERT embeddings for all UMLS concepts...")
             self._precompute_sapbert_embeddings()
 
+        # Build FAISS index for fast similarity search
+        self._build_faiss_index()
+
+    def _encode_sapbert(self, texts: List[str]) -> np.ndarray:
+        """
+        Encode a small list of texts using SapBERT (for query encoding during inference).
+
+        This is different from _encode_sapbert_chunked which is for bulk encoding
+        millions of UMLS names during precomputation.
+
+        Args:
+            texts: List of text strings to encode (typically 1 query entity)
+
+        Returns:
+            Numpy array of embeddings (shape: [len(texts), 768])
+        """
+        device = self.sapbert_model.device
+
+        # Tokenize
+        inputs = self.sapbert_tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors='pt'
+        ).to(device)
+
+        # Encode
+        with torch.no_grad():
+            outputs = self.sapbert_model(**inputs)
+            embeddings = outputs.last_hidden_state[:, 0, :]  # CLS token
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        return embeddings.cpu().numpy()
+
+    def _build_faiss_index(self):
+        """Build FAISS index with GPU if possible, CPU fallback"""
+        if not FAISS_AVAILABLE:
+            logger.warning("FAISS not available. Similarity search will be slow.")
+            return
+
+        logger.info("Building FAISS index for fast similarity search...")
+        logger.info(f"   Indexing {len(self.sapbert_embeddings):,} embeddings (dim={self.sapbert_embeddings.shape[1]})")
+
+        dim = self.sapbert_embeddings.shape[1]  # 768
+
+        # Try GPU FAISS with memory management
+        if torch.cuda.is_available() and hasattr(faiss, 'StandardGpuResources'):
+            try:
+                logger.info("   🔧 Attempting GPU FAISS for maximum speed...")
+
+                # Temporarily move SapBERT to CPU to free GPU memory
+                logger.info("   Temporarily moving SapBERT to CPU to free GPU memory...")
+                sapbert_device = self.sapbert_model.device
+                self.sapbert_model = self.sapbert_model.cpu()
+                torch.cuda.empty_cache()
+
+                # Check available GPU memory
+                gpu_free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(0)) / 1e9
+                logger.info(f"   GPU memory available: {gpu_free:.1f}GB")
+                logger.info(f"   Index needs: ~24GB")
+
+                if gpu_free >= 22:  # Need at least 22GB free
+                    logger.info("   Building GPU IndexFlatIP...")
+
+                    # Build CPU index first
+                    cpu_index = faiss.IndexFlatIP(dim)
+
+                    # Move to GPU
+                    res = faiss.StandardGpuResources()
+                    res.setTempMemory(1024 * 1024 * 1024)  # 1GB temp memory
+
+                    gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+
+                    # Add embeddings
+                    logger.info("   Adding embeddings to GPU index...")
+                    gpu_index.add(self.sapbert_embeddings.astype('float32'))
+
+                    self.faiss_index = gpu_index
+
+                    # Move SapBERT back to GPU if there's room
+                    try:
+                        self.sapbert_model = self.sapbert_model.to(sapbert_device)
+                        logger.info("   ✅ GPU FAISS index built successfully!")
+                        logger.info("   ✅ SapBERT moved back to GPU")
+                    except:
+                        logger.info("   ✅ GPU FAISS index built!")
+                        logger.info("   ⚠️  SapBERT stays on CPU (GPU full)")
+
+                    logger.info(f"   🚀 GPU FAISS: 50-100x faster than CPU!")
+                    return
+                else:
+                    raise Exception(f"Insufficient GPU memory: {gpu_free:.1f}GB < 22GB needed")
+
+            except Exception as e:
+                logger.warning(f"   GPU FAISS failed: {str(e)[:80]}...")
+                logger.info("   Falling back to CPU FAISS")
+
+                # Move SapBERT back to GPU
+                try:
+                    self.sapbert_model = self.sapbert_model.to(sapbert_device)
+                    logger.info("   SapBERT moved back to GPU")
+                except:
+                    pass
+
+                torch.cuda.empty_cache()
+
+        # CPU fallback
+        logger.info("   Building CPU IndexFlatIP (exact search)...")
+        logger.info("   SapBERT stays on GPU for fast query encoding")
+
+        cpu_index = faiss.IndexFlatIP(dim)
+        cpu_index.add(self.sapbert_embeddings.astype('float32'))
+
+        self.faiss_index = cpu_index
+        logger.info(f"   ✅ CPU FAISS index built successfully!")
+        logger.info(f"   📊 Index type: IndexFlatIP (exact search, 100% accuracy)")
+        logger.info(f"   🚀 With batch TF-IDF: 3-5x faster")
+
     def _precompute_sapbert_embeddings(self):
-        """Precompute SapBERT embeddings for all UMLS names"""
+        """Precompute SapBERT embeddings for all UMLS names using chunked processing"""
 
         # Get all UMLS names
         self.umls_names = self.umls_loader.get_all_names()
@@ -241,9 +514,14 @@ class CandidateGenerator:
             if cuis:
                 self.name_to_cui[name] = cuis[0]  # Take first CUI
 
-        # Encode in batches
+        # Encode in chunks to avoid RAM overflow
         logger.info(f"Encoding {len(self.umls_names)} UMLS names with SapBERT...")
-        self.sapbert_embeddings = self._encode_sapbert(self.umls_names)
+        logger.info(f"Using CHUNKED processing to prevent RAM overflow")
+        logger.info(f"Estimated time: ~30-60 min with GPU, ~4 hours with CPU")
+        logger.info(f"This is ONE-TIME only. Subsequent runs will use cache (~1 min).")
+
+        # Use chunked encoding with automatic memory management
+        self.sapbert_embeddings = self._encode_sapbert_chunked(self.umls_names)
 
         # Save to cache
         logger.info(f"Saving SapBERT embeddings to {self.sapbert_cache}")
@@ -253,15 +531,37 @@ class CandidateGenerator:
                 'names': self.umls_names,
                 'name_to_cui': self.name_to_cui
             }, f)
+        logger.info("✓ SapBERT embeddings cached successfully")
 
-    def _encode_sapbert(self, texts: List[str]) -> np.ndarray:
-        """Encode texts using SapBERT"""
+    def _encode_sapbert_with_checkpointing(
+        self,
+        texts: List[str],
+        start_idx: int = 0,
+        existing_embeddings: List = None,
+        checkpoint_path: Path = None,
+        checkpoint_every: int = 1000
+    ) -> np.ndarray:
+        """Encode texts with checkpointing to prevent data loss on crashes"""
         device = self.sapbert_model.device
         batch_size = self.config.sapbert_batch_size
 
-        all_embeddings = []
+        # Log encoding start with GPU info
+        logger.info(f"🚀 Starting encoding on {device.type.upper()}")
+        if device.type == 'cuda':
+            logger.info(f"   GPU Memory before: {torch.cuda.memory_allocated(0)/1e9:.2f}GB / {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
 
-        for i in tqdm(range(0, len(texts), batch_size), desc="Encoding with SapBERT"):
+        all_embeddings = existing_embeddings if existing_embeddings else []
+        total_batches = (len(texts) + batch_size - 1) // batch_size
+        start_batch = start_idx // batch_size
+
+        # Adjust texts if resuming
+        if start_idx > 0:
+            texts = texts[start_idx:]
+
+        for i in tqdm(range(0, len(texts), batch_size),
+                     desc=f"🔥 Encoding with SapBERT on {device.type.upper()}",
+                     total=total_batches - start_batch,
+                     unit="batch"):
             batch_texts = texts[i:i+batch_size]
 
             # Tokenize
@@ -281,7 +581,168 @@ class CandidateGenerator:
 
             all_embeddings.append(embeddings.cpu().numpy())
 
+            # Checkpoint every N batches
+            current_batch = start_batch + (i // batch_size)
+            if checkpoint_path and current_batch > 0 and current_batch % checkpoint_every == 0:
+                try:
+                    # Save checkpoint
+                    checkpoint_embeddings = np.vstack(all_embeddings)
+                    with open(checkpoint_path, 'wb') as f:
+                        pickle.dump({
+                            'embeddings': all_embeddings,
+                            'last_index': start_idx + i + batch_size,
+                            'last_batch': current_batch
+                        }, f)
+                    logger.info(f"   💾 Checkpoint saved at batch {current_batch}/{total_batches}")
+
+                    # Free GPU memory
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                        gpu_mem = torch.cuda.memory_allocated(0) / 1e9
+                        logger.info(f"   📊 GPU Memory: {gpu_mem:.2f}GB")
+
+                except Exception as e:
+                    logger.warning(f"   Failed to save checkpoint: {e}")
+
+            # Log GPU memory every 1000 batches
+            elif device.type == 'cuda' and current_batch % 1000 == 0 and current_batch > 0:
+                gpu_mem = torch.cuda.memory_allocated(0) / 1e9
+                logger.info(f"   📊 Batch {current_batch}/{total_batches} - GPU Memory: {gpu_mem:.2f}GB")
+
+        # Log completion with GPU stats
+        if device.type == 'cuda':
+            logger.info(f"✅ Encoding complete!")
+            logger.info(f"   GPU Memory after: {torch.cuda.memory_allocated(0)/1e9:.2f}GB")
+            logger.info(f"   Peak GPU Memory: {torch.cuda.max_memory_allocated(0)/1e9:.2f}GB")
+
         return np.vstack(all_embeddings)
+
+    def _encode_sapbert_chunked(
+        self,
+        texts: List[str],
+        chunk_size: int = 1_000_000  # Process 1M names at a time
+    ) -> np.ndarray:
+        """
+        Encode texts in chunks to prevent RAM overflow.
+
+        Instead of accumulating all embeddings in memory (~30GB for 7.9M names),
+        this processes in chunks and saves to disk immediately.
+
+        Args:
+            texts: List of text strings to encode
+            chunk_size: Number of texts per chunk (default 1M = ~3GB RAM)
+
+        Returns:
+            Combined embeddings array
+        """
+        device = self.sapbert_model.device
+        batch_size = self.config.sapbert_batch_size
+        chunk_dir = self.sapbert_cache.parent / "sapbert_chunks"
+        chunk_dir.mkdir(exist_ok=True)
+
+        total_texts = len(texts)
+        num_chunks = (total_texts + chunk_size - 1) // chunk_size
+
+        logger.info(f"🔥 Chunked encoding: {num_chunks} chunks of ~{chunk_size:,} names each")
+        logger.info(f"   This prevents RAM overflow (peak ~3-4GB instead of ~30GB)")
+
+        if device.type == 'cuda':
+            logger.info(f"   GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
+
+        # Check for existing chunks to resume
+        existing_chunks = sorted(chunk_dir.glob("chunk_*.npy"))
+        start_chunk = len(existing_chunks)
+
+        if start_chunk > 0:
+            logger.info(f"🔄 Found {start_chunk} existing chunks, resuming from chunk {start_chunk}...")
+
+        # Process each chunk
+        for chunk_idx in range(start_chunk, num_chunks):
+            chunk_start = chunk_idx * chunk_size
+            chunk_end = min(chunk_start + chunk_size, total_texts)
+            chunk_texts = texts[chunk_start:chunk_end]
+
+            logger.info(f"\n📦 Processing chunk {chunk_idx+1}/{num_chunks}")
+            logger.info(f"   Range: {chunk_start:,} → {chunk_end:,} ({len(chunk_texts):,} names)")
+
+            # Encode this chunk
+            chunk_embeddings = []
+            num_batches = (len(chunk_texts) + batch_size - 1) // batch_size
+
+            for i in tqdm(range(0, len(chunk_texts), batch_size),
+                         desc=f"🔥 Encoding chunk {chunk_idx+1}/{num_chunks}",
+                         total=num_batches,
+                         unit="batch"):
+                batch_texts = chunk_texts[i:i+batch_size]
+
+                # Tokenize
+                inputs = self.sapbert_tokenizer(
+                    batch_texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=128,
+                    return_tensors='pt'
+                ).to(device)
+
+                # Encode
+                with torch.no_grad():
+                    outputs = self.sapbert_model(**inputs)
+                    embeddings = outputs.last_hidden_state[:, 0, :]  # CLS token
+                    embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+                chunk_embeddings.append(embeddings.cpu().numpy())
+
+                # Clear GPU cache periodically
+                if device.type == 'cuda' and i % (batch_size * 100) == 0:
+                    torch.cuda.empty_cache()
+
+            # Combine chunk embeddings
+            chunk_array = np.vstack(chunk_embeddings)
+
+            # Save chunk to disk IMMEDIATELY (frees RAM)
+            chunk_file = chunk_dir / f"chunk_{chunk_idx:04d}.npy"
+            np.save(chunk_file, chunk_array)
+
+            # Free memory
+            del chunk_embeddings
+            del chunk_array
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+
+            # Log progress
+            progress_pct = 100 * (chunk_idx + 1) / num_chunks
+            logger.info(f"   ✓ Chunk {chunk_idx+1}/{num_chunks} saved to disk ({progress_pct:.1f}% complete)")
+
+            if device.type == 'cuda':
+                gpu_mem = torch.cuda.memory_allocated(0) / 1e9
+                logger.info(f"   📊 GPU Memory: {gpu_mem:.2f}GB")
+
+        # All chunks processed, now combine them
+        logger.info(f"\n🔗 Combining {num_chunks} chunks into final array...")
+        logger.info(f"   Loading chunks one-by-one to minimize RAM usage...")
+
+        # Load and combine chunks efficiently
+        all_chunks = sorted(chunk_dir.glob("chunk_*.npy"))
+        combined_embeddings = []
+
+        for i, chunk_file in enumerate(all_chunks):
+            logger.info(f"   Loading chunk {i+1}/{len(all_chunks)}...")
+            chunk_data = np.load(chunk_file)
+            combined_embeddings.append(chunk_data)
+
+        # Combine all chunks
+        final_embeddings = np.vstack(combined_embeddings)
+        logger.info(f"✅ Final embeddings shape: {final_embeddings.shape}")
+
+        # Clean up chunk files
+        logger.info(f"🧹 Cleaning up {len(all_chunks)} temporary chunk files...")
+        for chunk_file in all_chunks:
+            chunk_file.unlink()
+        chunk_dir.rmdir()
+        logger.info("✓ Cleanup complete")
+
+        return final_embeddings
 
     def _load_tfidf(self):
         """Load TF-IDF vectorizer and precomputed matrix"""

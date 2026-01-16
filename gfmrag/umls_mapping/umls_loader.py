@@ -182,21 +182,33 @@ class UMLSLoader:
 
         mrsty_path = Path(self.config.mrsty_path)
         if not mrsty_path.exists():
-            raise FileNotFoundError(f"MRSTY.RRF not found: {mrsty_path}")
+            logger.warning(f"MRSTY.RRF not found: {mrsty_path}, skipping semantic types")
+            return
 
+        types_added = 0
         with open(mrsty_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line in tqdm(f, desc="Parsing MRSTY"):
                 fields = line.strip().split('|')
 
-                # Fields: CUI, TUI, STN, STY, ATUI, CVF
+                if len(fields) < 2:
+                    continue
+
+                # MRSTY.RRF format: CUI|TUI|STN|STY|ATUI|CVF
+                # fields[0]: CUI (e.g., C0000005)
+                # fields[1]: TUI (e.g., T116) ← Semantic Type ID
                 cui = fields[0]
-                semantic_type = fields[3]
+                semantic_type_id = fields[1]  # TUI: T116, T121, etc.
 
-                if cui in self.concepts:
-                    if semantic_type not in self.concepts[cui].semantic_types:
-                        self.concepts[cui].semantic_types.append(semantic_type)
+                if cui in self.concepts and semantic_type_id:
+                    if semantic_type_id not in self.concepts[cui].semantic_types:
+                        self.concepts[cui].semantic_types.append(semantic_type_id)
+                        types_added += 1
 
-        logger.info(f"Added semantic types to {len(self.concepts)} concepts")
+        logger.info(f"✓ Added {types_added:,} semantic type mappings to concepts")
+
+        # Log statistics
+        concepts_with_types = sum(1 for c in self.concepts.values() if c.semantic_types)
+        logger.info(f"✓ Concepts with semantic types: {concepts_with_types:,} / {len(self.concepts):,}")
 
     def _parse_mrdef(self):
         """Parse MRDEF.RRF for definitions (optional)"""
