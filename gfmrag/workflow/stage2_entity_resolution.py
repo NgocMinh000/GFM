@@ -1248,22 +1248,26 @@ Where confidence is 0.0-1.0 (how certain you are about this classification).
         entity_ids_path = self.stage_paths["stage1_entity_ids"]
 
         # Check cache
+        logger.info(f"Checking for cached embeddings at: {embeddings_path}")
         if not self.config.force and embeddings_path.exists():
-            logger.info(f"Loading cached embeddings from: {embeddings_path}")
+            logger.info("✓ Cache found - loading cached embeddings (SapBERT model will not be loaded)")
             embeddings = np.load(embeddings_path)
             logger.info(f"✅ Loaded embeddings shape: {embeddings.shape}")
+            logger.info("   💡 Tip: Use --force flag to regenerate embeddings and see full model loading process")
             return embeddings
 
+        logger.info("✗ No cache found - will generate new embeddings")
         logger.info(f"Model: {self.config.sapbert_model}")
         logger.info(f"Device: {self.config.embedding_device}")
         logger.info(f"Batch size: {self.config.embedding_batch_size}")
         logger.info(f"Processing {len(self.entities)} entities...")
 
-        # Load SapBERT model
+        # Load SapBERT model from sentence-transformers (NOT HuggingFace transformers)
         from sentence_transformers import SentenceTransformer
 
-        logger.info("Loading SapBERT model...")
+        logger.info("Loading SapBERT model from sentence-transformers library...")
         model = SentenceTransformer(self.config.sapbert_model, device=self.config.embedding_device)
+        logger.info("✅ SapBERT model loaded successfully")
 
         # Encode entities in batches
         logger.info("Encoding entities...")
