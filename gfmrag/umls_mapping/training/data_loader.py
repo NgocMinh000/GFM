@@ -521,11 +521,12 @@ def load_medmentions(
     loader.print_statistics()
 
     # Split dataset
+    # Note: stratify=False to avoid errors with rare classes (single sample per class)
     train_mentions, val_mentions, test_mentions = loader.split_dataset(
         train_ratio=train_ratio,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
-        stratify=True,
+        stratify=False,  # Disabled: some CUIs have only 1 mention
     )
 
     # Save splits
