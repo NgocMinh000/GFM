@@ -339,17 +339,48 @@ class HardNegativeMiner:
         # Get unique CUIs
         unique_cuis = list(set(m["cui"] for m in mentions))
 
-        logger.info(f"Mining hard negatives for {len(unique_cuis)} unique CUIs")
+        logger.info(f"Mining hard negatives for {len(unique_cuis):,} unique CUIs")
 
-        # Mine negatives
+        # Mine negatives with progress tracking
         cui_to_negatives = {}
+        processed_count = 0
+        missing_count = 0
 
-        iterator = tqdm(unique_cuis, desc="Mining negatives") if show_progress else unique_cuis
+        iterator = tqdm(unique_cuis, desc="Mining negatives", disable=not show_progress)
 
         for cui in iterator:
+            # Track missing count before mining
+            missing_before = len(self.missing_cuis)
+
+            # Mine negatives for this CUI
             cui_to_negatives[cui] = self.mine_negatives_for_cui(cui)
 
-        logger.info(f"Mined negatives for {len(cui_to_negatives)} CUIs")
+            # Check if this CUI was missing
+            if len(self.missing_cuis) > missing_before:
+                missing_count += 1
+
+            processed_count += 1
+
+            # Log progress every 100 CUIs
+            if processed_count % 100 == 0:
+                success_count = processed_count - missing_count
+                success_pct = (success_count / processed_count * 100) if processed_count > 0 else 0
+                missing_pct = (missing_count / processed_count * 100) if processed_count > 0 else 0
+                logger.info(
+                    f"Progress: {processed_count:,}/{len(unique_cuis):,} CUIs "
+                    f"({processed_count/len(unique_cuis)*100:.1f}%) - "
+                    f"Success: {success_count:,} ({success_pct:.1f}%), "
+                    f"Missing: {missing_count:,} ({missing_pct:.1f}%)"
+                )
+
+        # Final summary
+        success_count = processed_count - missing_count
+        success_pct = (success_count / processed_count * 100) if processed_count > 0 else 0
+        missing_pct = (missing_count / processed_count * 100) if processed_count > 0 else 0
+
+        logger.info(f"✓ Mining completed: {processed_count:,} CUIs processed")
+        logger.info(f"  - Successfully mined: {success_count:,} ({success_pct:.1f}%)")
+        logger.info(f"  - Missing in UMLS:   {missing_count:,} ({missing_pct:.1f}%)")
 
         # Save cache
         if self.cache_path:
