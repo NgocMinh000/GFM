@@ -82,6 +82,9 @@ class CrossEncoderTrainer:
         self.device = self._setup_device()
         self.model.to(self.device)
 
+        # Gradient accumulation (must be set before optimizer/scheduler)
+        self.gradient_accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
+
         # Optimizer and scheduler
         self.optimizer = self._setup_optimizer()
         self.scheduler = self._setup_scheduler()
@@ -100,9 +103,6 @@ class CrossEncoderTrainer:
         # TensorBoard logging
         log_dir = config["logging"].get("tensorboard", {}).get("log_dir", "tmp/training/tensorboard")
         self.writer = SummaryWriter(log_dir=log_dir)
-
-        # Gradient accumulation
-        self.gradient_accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
 
         logger.info(f"Trainer initialized. Output dir: {output_dir}")
         logger.info(f"Device: {self.device}")
