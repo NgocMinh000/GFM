@@ -171,8 +171,8 @@ class MedMentionsLoader:
         """
         Load entity mentions from annotation file.
 
-        Format:
-        PMID \t Start \t End \t Mention Text \t Semantic Type \t CUI
+        Format (PubTator - pipe-delimited):
+        PMID|Start|End|Mention Text|Semantic Type|CUI
 
         Args:
             annotation_file: Annotation file name
@@ -194,9 +194,13 @@ class MedMentionsLoader:
                 if not line or line.startswith('#'):
                     continue
 
-                parts = line.split('\t')
+                # Skip title/abstract lines (PMID|t|... or PMID|a|...)
+                if '|t|' in line or '|a|' in line:
+                    continue
+
+                parts = line.split('|')
                 if len(parts) < 6:
-                    logger.warning(f"Line {line_num}: Invalid format (expected 6 fields)")
+                    logger.warning(f"Line {line_num}: Invalid format (expected 6 pipe-delimited fields, got {len(parts)})")
                     continue
 
                 pmid, start, end, mention_text, semantic_type, source_cui = parts[:6]
