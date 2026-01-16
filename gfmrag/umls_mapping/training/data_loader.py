@@ -171,8 +171,9 @@ class MedMentionsLoader:
         """
         Load entity mentions from annotation file.
 
-        Format (PubTator - pipe-delimited):
-        PMID|Start|End|Mention Text|Semantic Type|CUI
+        Format (PubTator):
+        - Title/Abstract lines: PMID|t|text or PMID|a|text (pipe-delimited)
+        - Annotation lines: PMID \t Start \t End \t Mention \t Type \t CUI (tab-delimited)
 
         Args:
             annotation_file: Annotation file name
@@ -198,9 +199,9 @@ class MedMentionsLoader:
                 if '|t|' in line or '|a|' in line:
                     continue
 
-                parts = line.split('|')
+                parts = line.split('\t')
                 if len(parts) < 6:
-                    logger.warning(f"Line {line_num}: Invalid format (expected 6 pipe-delimited fields, got {len(parts)})")
+                    logger.warning(f"Line {line_num}: Invalid format (expected 6 tab-delimited fields, got {len(parts)})")
                     continue
 
                 pmid, start, end, mention_text, semantic_type, source_cui = parts[:6]
