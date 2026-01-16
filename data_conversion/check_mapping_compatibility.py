@@ -134,6 +134,15 @@ for mapping_file in mapping_files:
 
         print(f"   Direct matches: {direct_matches}/{len(kg_sample_ids)} ({direct_matches/len(kg_sample_ids)*100:.1f}%)")
 
+        # Check if ANY kg IDs exist in mapping (for small mapping files)
+        if len(mapping_ids_set) < 10000:  # Small mapping file
+            # Check all kg IDs from this source (not just 100 samples)
+            all_kg_ids = set(str(id) for id in source_sample_ids[kg_source])
+            any_matches = len(all_kg_ids & mapping_ids_set)
+            if any_matches > 0:
+                print(f"   💡 Found {any_matches} matches when checking ALL kg.csv IDs for this source")
+                direct_matches = any_matches
+
         if direct_matches > best_match_count:
             best_match_count = direct_matches
             best_match = kg_source
@@ -151,36 +160,61 @@ for mapping_file in mapping_files:
                 if matches > 0:
                     normalizations.append((f"Remove {prefix}", matches))
 
-            # Try stripping leading zeros
+            # Try stripping leading zeros from BOTH sides
             try:
-                normalized_mapping = df_mapping[source_col].astype(str).str.lstrip('0')
-                normalized_kg = pd.Series([str(id).lstrip('0') for id in kg_sample_ids])
+                normalized_mapping = df_mapping[source_col].astype(str).str.lstrip('0').replace('', '0')
+                normalized_kg = pd.Series([str(id).lstrip('0') if str(id).lstrip('0') else '0' for id in kg_sample_ids])
                 matches = len(set(normalized_kg) & set(normalized_mapping))
                 if matches > direct_matches:
                     normalizations.append(("Strip leading zeros", matches))
             except:
                 pass
 
+            # Try with prefix removal + zero stripping
+            for prefix in ['HP:', 'DOID:', 'MONDO:', 'MESH:', 'NCIT:', 'OMIM:']:
+                try:
+                    # Remove prefix then strip zeros
+                    normalized_mapping = df_mapping[source_col].astype(str).str.replace(prefix, '', regex=False).str.lstrip('0').replace('', '0')
+                    normalized_kg = pd.Series([
+                        str(id).replace(prefix, '').lstrip('0') if str(id).replace(prefix, '').lstrip('0') else '0'
+                        for id in kg_sample_ids
+                    ])
+                    matches = len(set(normalized_kg) & set(normalized_mapping))
+                    if matches > direct_matches:
+                        normalizations.append((f"Remove {prefix} + strip zeros", matches))
+                except:
+                    pass
+
             if normalizations:
                 best_norm = max(normalizations, key=lambda x: x[1])
                 print(f"   💡 Suggested normalization: {best_norm[0]} → {best_norm[1]}/{len(kg_sample_ids)} matches ({best_norm[1]/len(kg_sample_ids)*100:.1f}%)")
+                # Update best match if normalization works
+                if best_norm[1] > best_match_count:
+                    best_match_count = best_norm[1]
+                    best_match = kg_source
 
     # Record result
-    if best_match_count >= len(list(source_sample_ids[best_match])[:100]) * 0.1:  # At least 10% match
+    # Consider compatible if we found ANY matches (even with normalization)
+    if best_match is not None and best_match_count > 0:
         print(f"\n   ✅ COMPATIBLE with kg.csv source: {best_match}")
+        # Calculate match rate based on total IDs in this source
+        total_kg_ids = len(source_sample_ids[best_match])
+        match_rate = best_match_count / total_kg_ids * 100 if total_kg_ids > 0 else 0
         compatible_mappings.append({
             'file': mapping_file.name,
             'source': source_name,
             'kg_source': best_match,
             'mappings': len(df_mapping),
-            'match_rate': best_match_count / len(list(source_sample_ids[best_match])[:100]) * 100
+            'matches_found': best_match_count,
+            'match_rate': match_rate
         })
     else:
-        print(f"\n   ❌ INCOMPATIBLE - ID formats don't match")
+        reason = 'No matches found' if best_match is None else 'No matching IDs'
+        print(f"\n   ❌ INCOMPATIBLE - {reason}")
         incompatible_mappings.append({
             'file': mapping_file.name,
             'source': source_name,
-            'reason': 'ID format mismatch',
+            'reason': reason,
             'mappings': len(df_mapping)
         })
 
@@ -191,10 +225,10 @@ print("="*80)
 
 print(f"\n✅ COMPATIBLE MAPPINGS: {len(compatible_mappings)}")
 if compatible_mappings:
-    print(f"\n{'Mapping File':<30} {'kg.csv Source':<20} {'Mappings':>10} {'Match%':>8}")
+    print(f"\n{'Mapping File':<30} {'kg.csv Source':<15} {'Mappings':>10} {'Matches':>10} {'Rate':>8}")
     print("-"*80)
-    for m in sorted(compatible_mappings, key=lambda x: -x['mappings']):
-        print(f"{m['file']:<30} {m['kg_source']:<20} {m['mappings']:>10,} {m['match_rate']:>7.1f}%")
+    for m in sorted(compatible_mappings, key=lambda x: -x['matches_found']):
+        print(f"{m['file']:<30} {m['kg_source']:<15} {m['mappings']:>10,} {m['matches_found']:>10,} {m['match_rate']:>7.1f}%")
 
 print(f"\n❌ INCOMPATIBLE MAPPINGS: {len(incompatible_mappings)}")
 if incompatible_mappings:
