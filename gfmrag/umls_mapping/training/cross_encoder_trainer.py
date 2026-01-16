@@ -127,15 +127,19 @@ class CrossEncoderTrainer:
         """Setup AdamW optimizer."""
         training_config = self.config["training"]
 
+        # Ensure learning_rate is float (yaml may parse as string)
+        lr = float(training_config["learning_rate"])
+        weight_decay = float(training_config.get("weight_decay", 0.01))
+        eps = float(training_config.get("adam_epsilon", 1e-8))
+
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=training_config["learning_rate"],
-            weight_decay=training_config.get("weight_decay", 0.01),
-            eps=training_config.get("adam_epsilon", 1e-8),
+            lr=lr,
+            weight_decay=weight_decay,
+            eps=eps,
         )
 
-        logger.info(f"Optimizer: AdamW(lr={training_config['learning_rate']}, "
-                    f"weight_decay={training_config.get('weight_decay', 0.01)})")
+        logger.info(f"Optimizer: AdamW(lr={lr}, weight_decay={weight_decay})")
 
         return optimizer
 

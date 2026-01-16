@@ -61,8 +61,8 @@ hard_negatives:
   faiss_index_path: "tmp/umls_faiss_index"
 
   # Mining parameters
-  similarity_threshold: 0.85  # Only very similar CUIs (harder negatives)
-  top_k_candidates: 20        # Retrieve top-20 similar CUIs
+  similarity_threshold: 0.70  # Similar CUIs (lowered from 0.85 for more candidates)
+  top_k_candidates: 50        # Retrieve top-50 similar CUIs (increased from 20)
 
   # Negatives per positive sample
   semantic_negatives: 5   # High similarity, wrong CUI
