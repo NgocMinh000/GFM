@@ -525,6 +525,7 @@ def main():
     medmentions_config = config["dataset"]["medmentions"]
     train_mentions, val_mentions, test_mentions = load_medmentions(
         data_path=medmentions_config["path"],
+        annotation_file="corpus_pubtator.txt",  # Full annotation data (not just PMIDs)
         train_ratio=config["dataset"]["train_ratio"],
         val_ratio=config["dataset"]["val_ratio"],
         test_ratio=config["dataset"]["test_ratio"],
