@@ -505,7 +505,20 @@ def main():
     # Load UMLS
     logger.info("Loading UMLS...")
     from gfmrag.umls_mapping.umls_loader import UMLSLoader
-    umls_loader = UMLSLoader()
+    from gfmrag.umls_mapping.config import UMLSMappingConfig
+
+    # Create UMLS config
+    umls_config = UMLSMappingConfig(
+        kg_clean_path='dummy',  # Not needed for training
+        umls_data_dir='data/umls',
+        output_root='tmp/umls_training',
+        mrconso_path='data/umls/META/MRCONSO.RRF',
+        mrsty_path='data/umls/META/MRSTY.RRF',
+        umls_cache_dir='data/umls/processed',
+    )
+
+    umls_loader = UMLSLoader(umls_config)
+    umls_loader.load()
 
     # Load MedMentions dataset
     logger.info("Loading MedMentions dataset...")
