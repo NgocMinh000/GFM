@@ -85,6 +85,9 @@ class HardNegativeMiner:
         # All CUIs for random sampling
         self.all_cuis = list(umls_loader.concepts.keys())
 
+        # Tracking for statistics
+        self.missing_cuis = set()  # Track CUIs not found in UMLS
+
         # Cache for mined negatives
         self.negative_cache: Dict[str, Dict] = {}
         if self.cache_path and self.cache_path.exists():
@@ -179,7 +182,8 @@ class HardNegativeMiner:
         # Get CUI embedding
         concept = self.umls_loader.concepts.get(cui)
         if not concept or not hasattr(concept, 'embedding'):
-            logger.warning(f"CUI {cui} not found or has no embedding")
+            # Track missing CUI (don't spam warnings)
+            self.missing_cuis.add(cui)
             return []
 
         embedding = concept.embedding.reshape(1, -1)
@@ -240,7 +244,8 @@ class HardNegativeMiner:
         # Get correct CUI's semantic type
         concept = self.umls_loader.concepts.get(cui)
         if not concept or not concept.semantic_types:
-            logger.warning(f"CUI {cui} has no semantic type")
+            # Track missing CUI (don't spam warnings)
+            self.missing_cuis.add(cui)
             return []
 
         correct_type = concept.semantic_types[0]
@@ -426,6 +431,12 @@ class HardNegativeMiner:
         print("=" * 80)
         print(f"CUIs with negatives:     {stats['num_cuis']:,}")
         print(f"Total negatives:         {stats['total_negatives']:,}")
+
+        # Show missing CUIs info
+        if self.missing_cuis:
+            print(f"\nMissing CUIs (not in UMLS): {len(self.missing_cuis):,}")
+            print(f"  Note: These CUIs will use random negatives only")
+            print(f"  Reason: UMLS version mismatch (MedMentions uses 2017AA)")
         print()
         print("Semantic Hard Negatives (high similarity, wrong CUI):")
         print("-" * 80)
