@@ -81,8 +81,8 @@ hard_negatives:
 # ==============================================================================
 training:
   # Batch size
-  batch_size: 32                      # Per GPU
-  gradient_accumulation_steps: 2      # Effective batch size = 32 * 2 = 64
+  batch_size: 16                      # Per GPU (reduced to avoid OOM)
+  gradient_accumulation_steps: 4      # Effective batch size = 16 * 4 = 64
 
   # Optimization
   learning_rate: 2e-5
@@ -186,7 +186,7 @@ hardware:
   gpu_ids: [0]                # GPU IDs to use
 
   # CPU threads
-  num_workers: 4              # DataLoader workers
+  num_workers: 0              # DataLoader workers (0 = main process only, avoids OOM)
   pin_memory: true            # Pin memory for faster GPU transfer
 
   # Gradient checkpointing (saves memory)
