@@ -76,6 +76,12 @@ def build_faiss_index(
 
     logger.info(f"Generated embeddings shape: {embeddings.shape}")
 
+    # Assign embeddings to concepts (needed for hard negative mining)
+    logger.info("Assigning embeddings to concepts...")
+    for cui, embedding in tqdm(zip(cuis, embeddings), total=len(cuis), desc="Assigning"):
+        umls_loader.concepts[cui].embedding = embedding
+    logger.info("✓ Embeddings assigned to all concepts")
+
     # Build FAISS index
     logger.info("Building FAISS index...")
     dim = embeddings.shape[1]
@@ -115,6 +121,11 @@ def build_faiss_index(
         for cui in cuis:
             f.write(f"{cui}\n")
 
+    # Save UMLS cache with embeddings (for hard negative mining)
+    logger.info("Saving UMLS concepts with embeddings to cache...")
+    umls_loader._save_cache()
+    logger.info("✓ UMLS cache updated with embeddings")
+
     logger.info("="*80)
     logger.info("✅ FAISS Index Built Successfully!")
     logger.info("="*80)
@@ -122,6 +133,7 @@ def build_faiss_index(
     logger.info(f"CUI list: {cui_list_file}")
     logger.info(f"Total vectors: {index.ntotal:,}")
     logger.info(f"Dimension: {dim}")
+    logger.info(f"UMLS cache: {umls_loader.config.umls_cache_dir}/umls_concepts.pkl (with embeddings)")
 
 
 def main():
