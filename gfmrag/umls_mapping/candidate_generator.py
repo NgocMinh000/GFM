@@ -16,6 +16,7 @@ import pickle
 from transformers import AutoTokenizer, AutoModel
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from joblib import Parallel, delayed, parallel_backend
 
 try:
     import faiss
@@ -129,30 +130,66 @@ class CandidateGenerator:
             # Fallback: process one by one
             return [self.generate_candidates(entity, k) for entity in entities]
 
-        # Batch TF-IDF search (OPTIMIZED: Batch vectorize once + simple loop)
-        # Single batch vectorization eliminates redundant transform overhead
+        # Batch TF-IDF search (OPTIMIZED: Multi-core with chunking)
         entities_lower = [e.lower() for e in entities]
 
         # Vectorize ALL queries at once (10-15x faster than individual transforms)
-        query_vecs_batch = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab] sparse
+        query_vecs = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab] sparse
 
-        # Simple loop (no threading overhead, scipy sparse ops are already optimized)
+        # Multi-core processing with joblib (shared memory for tfidf_matrix)
+        # Joblib's loky backend uses shared memory for large numpy arrays → no RAM spike
+        import os
+
+        def _process_tfidf_chunk(query_indices, query_vecs_chunk, tfidf_matrix, top_k):
+            """Process a chunk of queries in parallel worker (memory-efficient)"""
+            chunk_indices = []
+            chunk_scores = []
+
+            for i in range(query_vecs_chunk.shape[0]):
+                # Get sparse query vector (no copy)
+                query_vec = query_vecs_chunk[i]
+
+                # Sparse matmul: query @ tfidf_matrix.T (releases GIL in BLAS)
+                similarities = (query_vec * tfidf_matrix.T).toarray()[0]
+
+                # Fast top-k selection using argpartition (O(n) vs O(n log n) for sort)
+                top_k_idx = np.argpartition(-similarities, top_k)[:top_k]
+                top_k_idx = top_k_idx[np.argsort(-similarities[top_k_idx])]
+
+                chunk_indices.append(top_k_idx)
+                chunk_scores.append(similarities[top_k_idx])
+
+            return chunk_indices, chunk_scores
+
+        # Determine optimal parallelization
+        n_jobs = min(os.cpu_count() or 1, 20)  # Use up to 20 cores
+        chunk_size = max(50, len(entities_lower) // (n_jobs * 2))  # 2x oversubscription for load balancing
+
+        # Split queries into chunks for parallel processing
+        query_chunks = []
+        for i in range(0, len(entities_lower), chunk_size):
+            chunk_end = min(i + chunk_size, len(entities_lower))
+            query_indices = list(range(i, chunk_end))
+            query_vecs_chunk = query_vecs[i:chunk_end]
+            query_chunks.append((query_indices, query_vecs_chunk))
+
+        # Process chunks in parallel (loky backend uses shared memory for large arrays)
+        # This avoids copying tfidf_matrix to each worker (saves ~4GB × n_jobs RAM)
+        logger.debug(f"TF-IDF parallel search: {len(query_chunks)} chunks × {n_jobs} workers")
+
+        with parallel_backend('loky', n_jobs=n_jobs):
+            results = Parallel(verbose=0)(
+                delayed(_process_tfidf_chunk)(
+                    indices, vecs, self.tfidf_matrix, self.config.sapbert_top_k
+                ) for indices, vecs in query_chunks
+            )
+
+        # Flatten results
         tfidf_top_k_indices_list = []
         tfidf_top_k_scores_list = []
-
-        for i in range(len(entities_lower)):
-            # Get i-th sparse query vector
-            query_vec = query_vecs_batch[i]
-
-            # Sparse matmul (scipy optimized, releases GIL internally)
-            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]
-
-            # Fast top-k selection
-            top_k_idx = np.argpartition(-similarities, self.config.sapbert_top_k)[:self.config.sapbert_top_k]
-            top_k_idx = top_k_idx[np.argsort(-similarities[top_k_idx])]
-
-            tfidf_top_k_indices_list.append(top_k_idx)
-            tfidf_top_k_scores_list.append(similarities[top_k_idx])
+        for chunk_indices, chunk_scores in results:
+            tfidf_top_k_indices_list.extend(chunk_indices)
+            tfidf_top_k_scores_list.extend(chunk_scores)
 
         # Convert to arrays
         tfidf_top_k_indices = np.array(tfidf_top_k_indices_list)
