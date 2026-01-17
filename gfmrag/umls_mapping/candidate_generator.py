@@ -129,31 +129,34 @@ class CandidateGenerator:
             # Fallback: process one by one
             return [self.generate_candidates(entity, k) for entity in entities]
 
-        # Batch TF-IDF search (OPTIMIZED: Inline processing for speed)
-        # Process one-by-one with sparse ops (fastest for sparse matrices)
+        # Batch TF-IDF search (FASTEST: Single vectorize + batch matmul)
+        # KEY OPTIMIZATION: Vectorize all queries at once, then process in parallel
         entities_lower = [e.lower() for e in entities]
 
-        tfidf_top_k_indices_list = []
-        tfidf_top_k_scores_list = []
+        # Vectorize ALL queries at once (batch transform - FAST!)
+        query_vecs_batch = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab] sparse
 
-        for entity_lower in entities_lower:
-            # Transform single query (stays sparse)
-            query_vec = self.tfidf_vectorizer.transform([entity_lower])  # [1, vocab_size] sparse
+        # Process each query's sparse vector (parallel with ThreadPoolExecutor)
+        from concurrent.futures import ThreadPoolExecutor
+        import os
 
-            # Compute similarities (sparse × sparse = sparse, FAST!)
-            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]  # [7.9M] dense
+        n_workers = min(len(entities_lower), os.cpu_count() or 4, 8)  # Cap at 8 to avoid overhead
 
-            # Get top-k indices and scores using argpartition (O(n) instead of O(n log n))
-            top_k_indices = np.argpartition(-similarities, self.config.sapbert_top_k)[:self.config.sapbert_top_k]
-            top_k_indices = top_k_indices[np.argsort(-similarities[top_k_indices])]  # Sort top-k
-            top_k_scores = similarities[top_k_indices]
+        def process_query(i):
+            """Process single query vector (thread-safe for sparse ops)"""
+            query_vec = query_vecs_batch[i]  # Get i-th sparse row
+            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]
+            top_k_idx = np.argpartition(-similarities, self.config.sapbert_top_k)[:self.config.sapbert_top_k]
+            top_k_idx = top_k_idx[np.argsort(-similarities[top_k_idx])]
+            return top_k_idx, similarities[top_k_idx]
 
-            tfidf_top_k_indices_list.append(top_k_indices)
-            tfidf_top_k_scores_list.append(top_k_scores)
+        # Execute in parallel
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            results = list(executor.map(process_query, range(len(entities_lower))))
 
-        # Convert to arrays for easier indexing
-        tfidf_top_k_indices = np.array(tfidf_top_k_indices_list)  # [batch_size, k]
-        tfidf_top_k_scores = np.array(tfidf_top_k_scores_list)    # [batch_size, k]
+        # Unpack
+        tfidf_top_k_indices = np.array([r[0] for r in results])
+        tfidf_top_k_scores = np.array([r[1] for r in results])
 
         # Process results for each entity
         all_candidates = []
