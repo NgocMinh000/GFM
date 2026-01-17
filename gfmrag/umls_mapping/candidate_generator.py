@@ -55,6 +55,7 @@ class CandidateGenerator:
         cache_dir = Path(config.umls_cache_dir)
         self.sapbert_cache = cache_dir / "sapbert_embeddings.pkl"
         self.tfidf_cache = cache_dir / "tfidf_vectorizer.pkl"
+        self.faiss_cache = cache_dir / "faiss_ivf.index"
 
         # Initialize models (lazy loading)
         self.sapbert_model = None
@@ -455,6 +456,17 @@ class CandidateGenerator:
             logger.warning("FAISS not available. Similarity search will be slow.")
             return
 
+        # Check if we have cached index
+        if self.faiss_cache.exists() and not self.config.force_recompute:
+            logger.info(f"Loading precomputed FAISS index from {self.faiss_cache}")
+            try:
+                self.faiss_index = faiss.read_index(str(self.faiss_cache))
+                logger.info(f"   ✓ Loaded IVF index with {self.faiss_index.ntotal:,} vectors")
+                return
+            except Exception as e:
+                logger.warning(f"   Failed to load cached index: {e}")
+                logger.info("   Rebuilding index...")
+
         logger.info("Building FAISS index for fast similarity search...")
         logger.info(f"   Indexing {len(self.sapbert_embeddings):,} embeddings (dim={self.sapbert_embeddings.shape[1]})")
 
@@ -545,30 +557,44 @@ class CandidateGenerator:
 
         # Sample embeddings for training (every Nth sample)
         sample_step = max(1, n_embeddings // train_size)
-        train_embeddings = self.sapbert_embeddings[::sample_step].astype('float32')
 
-        # Ensure contiguous array
-        if not train_embeddings.flags['C_CONTIGUOUS']:
-            train_embeddings = np.ascontiguousarray(train_embeddings)
+        # Load sampled embeddings as contiguous float32 array
+        train_embeddings = np.ascontiguousarray(
+            self.sapbert_embeddings[::sample_step],
+            dtype=np.float32
+        )
 
         cpu_index.train(train_embeddings)
         logger.info(f"   ✓ Training complete")
 
+        # Free training data
+        del train_embeddings
+        import gc
+        gc.collect()
+
         # Add all embeddings in batches to avoid memory spike
-        batch_size = 100000
+        # Use smaller batch size to prevent OOM with memory-mapped arrays
+        batch_size = 50000  # Reduced from 100K to minimize memory spikes
         logger.info(f"   Adding {n_embeddings:,} embeddings in batches of {batch_size:,}...")
 
+        import gc
         for i in range(0, n_embeddings, batch_size):
             end = min(i + batch_size, n_embeddings)
-            batch = self.sapbert_embeddings[i:end].astype('float32')
 
-            # Ensure contiguous
-            if not batch.flags['C_CONTIGUOUS']:
-                batch = np.ascontiguousarray(batch)
+            # Load batch from memory-mapped array
+            batch = self.sapbert_embeddings[i:end]
 
-            cpu_index.add(batch)
+            # Convert to float32 contiguous array
+            batch_f32 = np.ascontiguousarray(batch, dtype=np.float32)
 
-            if (i // batch_size + 1) % 10 == 0:
+            # Add to index
+            cpu_index.add(batch_f32)
+
+            # Explicitly free memory
+            del batch, batch_f32
+            gc.collect()
+
+            if (i // batch_size + 1) % 10 == 0 or end == n_embeddings:
                 logger.info(f"      Added {end:,} / {n_embeddings:,} ({end/n_embeddings*100:.1f}%)")
 
         # Set search parameters
@@ -576,9 +602,12 @@ class CandidateGenerator:
 
         self.faiss_index = cpu_index
         logger.info(f"   ✓ IVF index built successfully with {nlist:,} clusters")
-        logger.info(f"   ✅ CPU FAISS index built successfully!")
-        logger.info(f"   📊 Index type: IndexFlatIP (exact search, 100% accuracy)")
-        logger.info(f"   🚀 With batch TF-IDF: 3-5x faster")
+
+        # Save index to cache for future runs
+        logger.info(f"   Saving FAISS index to {self.faiss_cache}...")
+        faiss.write_index(cpu_index, str(self.faiss_cache))
+        logger.info(f"   ✓ Index cached successfully")
+        logger.info(f"   ✅ IVF index built and cached!")
 
     def _precompute_sapbert_embeddings(self):
         """Precompute SapBERT embeddings for all UMLS names using chunked processing"""
