@@ -129,34 +129,22 @@ class CandidateGenerator:
             # Fallback: process one by one
             return [self.generate_candidates(entity, k) for entity in entities]
 
-        # Batch TF-IDF search (FIXED: Process one-by-one to avoid memory explosion)
-        # NOTE: Cannot batch TF-IDF efficiently because:
-        #   - tfidf_matrix is HUGE (7.9M × vocab_size)
-        #   - Batching creates dense [batch_size × 7.9M] matrix → OOM + slow
-        #   - Processing one-by-one with sparse ops is actually FASTER
+        # Batch TF-IDF search with GPU acceleration (chunked to avoid VRAM overflow)
         entities_lower = [e.lower() for e in entities]
 
-        tfidf_top_k_indices_list = []
-        tfidf_top_k_scores_list = []
+        # Transform queries (sparse)
+        query_vecs = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab_size] sparse
 
-        for entity_lower in entities_lower:
-            # Transform single query (stays sparse)
-            query_vec = self.tfidf_vectorizer.transform([entity_lower])  # [1, vocab_size] sparse
-
-            # Compute similarities (sparse × sparse = sparse, FAST!)
-            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]  # [7.9M] dense
-
-            # Get top-k indices and scores
-            top_k_indices = np.argpartition(-similarities, self.config.sapbert_top_k)[:self.config.sapbert_top_k]
-            top_k_indices = top_k_indices[np.argsort(-similarities[top_k_indices])]  # Sort top-k
-            top_k_scores = similarities[top_k_indices]
-
-            tfidf_top_k_indices_list.append(top_k_indices)
-            tfidf_top_k_scores_list.append(top_k_scores)
-
-        # Convert to arrays for easier indexing
-        tfidf_top_k_indices = np.array(tfidf_top_k_indices_list)  # [batch_size, k]
-        tfidf_top_k_scores = np.array(tfidf_top_k_scores_list)    # [batch_size, k]
+        # GPU-accelerated search if available
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            tfidf_top_k_indices, tfidf_top_k_scores = self._tfidf_search_gpu_chunked(
+                query_vecs, self.config.sapbert_top_k
+            )
+        else:
+            # CPU fallback
+            tfidf_top_k_indices, tfidf_top_k_scores = self._tfidf_search_cpu(
+                query_vecs, self.config.sapbert_top_k
+            )
 
         # Process results for each entity
         all_candidates = []
@@ -467,6 +455,112 @@ class CandidateGenerator:
             embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
 
         return embeddings.cpu().numpy()
+
+    def _tfidf_search_gpu_chunked(self, query_vecs, top_k: int):
+        """
+        GPU-accelerated TF-IDF search with chunking to avoid VRAM overflow
+
+        Args:
+            query_vecs: Sparse matrix [batch_size, vocab_size]
+            top_k: Number of top results to return
+
+        Returns:
+            (top_k_indices, top_k_scores): Arrays of shape [batch_size, top_k]
+        """
+        import torch
+
+        batch_size = query_vecs.shape[0]
+        n_umls = self.tfidf_matrix.shape[0]
+
+        # Convert query vectors to dense GPU tensor
+        query_dense = torch.from_numpy(query_vecs.toarray()).float().cuda()  # [batch_size, vocab]
+
+        # Track top-k across all chunks
+        global_top_k_scores = torch.full((batch_size, top_k), float('-inf'), device='cuda')
+        global_top_k_indices = torch.zeros((batch_size, top_k), dtype=torch.long, device='cuda')
+
+        # Process tfidf_matrix in chunks to avoid VRAM overflow
+        # Chunk size: balance between speed and memory
+        # 50K vectors × vocab_size (~50K) × 4 bytes ≈ 10GB
+        chunk_size = 50000  # Adjust based on available VRAM
+
+        for chunk_start in range(0, n_umls, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_umls)
+
+            # Convert chunk to dense and move to GPU
+            chunk_matrix = torch.from_numpy(
+                self.tfidf_matrix[chunk_start:chunk_end].toarray()
+            ).float().cuda()  # [chunk_size, vocab]
+
+            # Compute similarities: [batch_size, vocab] @ [vocab, chunk_size] = [batch_size, chunk_size]
+            chunk_sims = torch.matmul(query_dense, chunk_matrix.T)
+
+            # Get top-k from this chunk
+            chunk_top_k_scores, chunk_top_k_indices = torch.topk(
+                chunk_sims, min(top_k, chunk_sims.shape[1]), dim=1
+            )
+
+            # Adjust indices to global positions
+            chunk_top_k_indices = chunk_top_k_indices + chunk_start
+
+            # Merge with global top-k
+            merged_scores = torch.cat([global_top_k_scores, chunk_top_k_scores], dim=1)
+            merged_indices = torch.cat([global_top_k_indices, chunk_top_k_indices], dim=1)
+
+            # Keep top-k
+            global_top_k_scores, top_k_positions = torch.topk(merged_scores, top_k, dim=1)
+            global_top_k_indices = torch.gather(merged_indices, 1, top_k_positions)
+
+            # Free GPU memory
+            del chunk_matrix, chunk_sims, chunk_top_k_scores, chunk_top_k_indices
+            del merged_scores, merged_indices, top_k_positions
+            torch.cuda.empty_cache()
+
+        # Move results back to CPU
+        top_k_indices = global_top_k_indices.cpu().numpy()
+        top_k_scores = global_top_k_scores.cpu().numpy()
+
+        # Free GPU memory
+        del query_dense, global_top_k_scores, global_top_k_indices
+        torch.cuda.empty_cache()
+
+        return top_k_indices, top_k_scores
+
+    def _tfidf_search_cpu(self, query_vecs, top_k: int):
+        """
+        CPU fallback for TF-IDF search (sparse operations)
+
+        Args:
+            query_vecs: Sparse matrix [batch_size, vocab_size]
+            top_k: Number of top results to return
+
+        Returns:
+            (top_k_indices, top_k_scores): Arrays of shape [batch_size, top_k]
+        """
+        batch_size = query_vecs.shape[0]
+
+        tfidf_top_k_indices_list = []
+        tfidf_top_k_scores_list = []
+
+        for i in range(batch_size):
+            query_vec = query_vecs[i]  # Sparse vector
+
+            # Compute similarities (sparse × sparse = sparse, FAST!)
+            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]  # [n_umls] dense
+
+            # Get top-k indices and scores
+            top_k_indices = np.argpartition(-similarities, top_k)[:top_k]
+            top_k_indices = top_k_indices[np.argsort(-similarities[top_k_indices])]  # Sort top-k
+            top_k_scores = similarities[top_k_indices]
+
+            tfidf_top_k_indices_list.append(top_k_indices)
+            tfidf_top_k_scores_list.append(top_k_scores)
+
+        # Convert to arrays
+        top_k_indices = np.array(tfidf_top_k_indices_list)  # [batch_size, k]
+        top_k_scores = np.array(tfidf_top_k_scores_list)    # [batch_size, k]
+
+        return top_k_indices, top_k_scores
 
     def _build_faiss_index(self):
         """Build FAISS index with GPU if possible, CPU fallback"""
@@ -902,6 +996,16 @@ class CandidateGenerator:
         else:
             logger.info("Building TF-IDF index for all UMLS concepts...")
             self._precompute_tfidf()
+
+        # Log GPU/CPU usage for TF-IDF search
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            logger.info(f"✅ GPU-accelerated TF-IDF search enabled: {gpu_name} ({vram_gb:.1f}GB VRAM)")
+            logger.info(f"   TF-IDF will use chunked GPU processing (chunk_size=50K)")
+        else:
+            logger.info("⚠️  GPU not available, TF-IDF search will use CPU (sparse ops)")
+            logger.info("   This is still fast for TF-IDF due to sparsity")
 
     def _precompute_tfidf(self):
         """Precompute TF-IDF matrix for all UMLS names"""
