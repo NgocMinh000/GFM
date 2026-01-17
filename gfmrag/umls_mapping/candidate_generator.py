@@ -129,18 +129,31 @@ class CandidateGenerator:
             # Fallback: process one by one
             return [self.generate_candidates(entity, k) for entity in entities]
 
-        # Batch TF-IDF search with GPU acceleration (chunked to avoid VRAM overflow)
+        # Batch TF-IDF search (OPTIMIZED: Inline processing for speed)
+        # Process one-by-one with sparse ops (fastest for sparse matrices)
         entities_lower = [e.lower() for e in entities]
 
-        # Transform queries (sparse)
-        query_vecs = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab_size] sparse
+        tfidf_top_k_indices_list = []
+        tfidf_top_k_scores_list = []
 
-        # IMPORTANT: CPU sparse ops are FASTER than GPU for TF-IDF
-        # Reason: Sparse → dense conversion + GPU transfer overhead >> CPU sparse matmul
-        # Use CPU fallback (optimized sparse operations)
-        tfidf_top_k_indices, tfidf_top_k_scores = self._tfidf_search_cpu(
-            query_vecs, self.config.sapbert_top_k
-        )
+        for entity_lower in entities_lower:
+            # Transform single query (stays sparse)
+            query_vec = self.tfidf_vectorizer.transform([entity_lower])  # [1, vocab_size] sparse
+
+            # Compute similarities (sparse × sparse = sparse, FAST!)
+            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]  # [7.9M] dense
+
+            # Get top-k indices and scores using argpartition (O(n) instead of O(n log n))
+            top_k_indices = np.argpartition(-similarities, self.config.sapbert_top_k)[:self.config.sapbert_top_k]
+            top_k_indices = top_k_indices[np.argsort(-similarities[top_k_indices])]  # Sort top-k
+            top_k_scores = similarities[top_k_indices]
+
+            tfidf_top_k_indices_list.append(top_k_indices)
+            tfidf_top_k_scores_list.append(top_k_scores)
+
+        # Convert to arrays for easier indexing
+        tfidf_top_k_indices = np.array(tfidf_top_k_indices_list)  # [batch_size, k]
+        tfidf_top_k_scores = np.array(tfidf_top_k_scores_list)    # [batch_size, k]
 
         # Process results for each entity
         all_candidates = []
@@ -1010,10 +1023,9 @@ class CandidateGenerator:
             self._precompute_tfidf()
 
         # Log TF-IDF search method
-        logger.info("✅ TF-IDF search: Using CPU sparse matrix operations")
-        logger.info("   CPU sparse ops are FASTER than GPU for TF-IDF")
-        logger.info("   (Sparse → dense conversion overhead >> CPU sparse matmul)")
-        logger.info("   Expected: ~2-5 seconds per batch")
+        logger.info("✅ TF-IDF search: Optimized CPU sparse matrix operations")
+        logger.info("   Sequential processing with sparse ops (fastest for sparse data)")
+        logger.info("   Expected: ~2-5 seconds per batch (32 entities)")
 
     def _precompute_tfidf(self):
         """Precompute TF-IDF matrix for all UMLS names"""
