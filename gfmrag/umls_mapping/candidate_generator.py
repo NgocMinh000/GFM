@@ -135,16 +135,12 @@ class CandidateGenerator:
         # Transform queries (sparse)
         query_vecs = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab_size] sparse
 
-        # GPU-accelerated search if available
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            tfidf_top_k_indices, tfidf_top_k_scores = self._tfidf_search_gpu_chunked(
-                query_vecs, self.config.sapbert_top_k
-            )
-        else:
-            # CPU fallback
-            tfidf_top_k_indices, tfidf_top_k_scores = self._tfidf_search_cpu(
-                query_vecs, self.config.sapbert_top_k
-            )
+        # IMPORTANT: CPU sparse ops are FASTER than GPU for TF-IDF
+        # Reason: Sparse → dense conversion + GPU transfer overhead >> CPU sparse matmul
+        # Use CPU fallback (optimized sparse operations)
+        tfidf_top_k_indices, tfidf_top_k_scores = self._tfidf_search_cpu(
+            query_vecs, self.config.sapbert_top_k
+        )
 
         # Process results for each entity
         all_candidates = []
@@ -1013,15 +1009,11 @@ class CandidateGenerator:
             logger.info("Building TF-IDF index for all UMLS concepts...")
             self._precompute_tfidf()
 
-        # Log GPU/CPU usage for TF-IDF search
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            gpu_name = torch.cuda.get_device_name(0)
-            vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-            logger.info(f"✅ GPU-accelerated TF-IDF search enabled: {gpu_name} ({vram_gb:.1f}GB VRAM)")
-            logger.info(f"   TF-IDF will use chunked GPU processing (chunk_size=50K)")
-        else:
-            logger.info("⚠️  GPU not available, TF-IDF search will use CPU (sparse ops)")
-            logger.info("   This is still fast for TF-IDF due to sparsity")
+        # Log TF-IDF search method
+        logger.info("✅ TF-IDF search: Using CPU sparse matrix operations")
+        logger.info("   CPU sparse ops are FASTER than GPU for TF-IDF")
+        logger.info("   (Sparse → dense conversion overhead >> CPU sparse matmul)")
+        logger.info("   Expected: ~2-5 seconds per batch")
 
     def _precompute_tfidf(self):
         """Precompute TF-IDF matrix for all UMLS names"""
