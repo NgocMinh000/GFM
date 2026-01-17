@@ -116,7 +116,13 @@ class Stage3UMLSMapping:
         logger.info(f"Processing {len(entity_list)} entities in batches of {batch_size}")
         logger.info("Batch encoding + search for faster candidate generation")
 
-        for i in tqdm(range(0, len(entity_list), batch_size), desc="Generating candidates (batched)", unit="batch"):
+        # Temporarily reduce logging to avoid tqdm conflicts
+        import logging
+        original_level = logging.getLogger('gfmrag.umls_mapping.candidate_generator').level
+        logging.getLogger('gfmrag.umls_mapping.candidate_generator').setLevel(logging.WARNING)
+
+        pbar = tqdm(range(0, len(entity_list), batch_size), desc="Generating candidates (batched)", unit="batch")
+        for i in pbar:
             batch_entities = entity_list[i:i+batch_size]
             batch_texts = [entities[e].normalized for e in batch_entities]
 
@@ -133,6 +139,14 @@ class Stage3UMLSMapping:
                 # Track warnings
                 if len(candidates) == 0:
                     self.metrics.add_warning(f"No candidates found for: {entity}")
+
+            # Update progress bar with stats
+            pbar.set_postfix({
+                'avg_candidates': f"{sum(len(c) for c in batch_candidates)/len(batch_candidates):.1f}"
+            })
+
+        # Restore logging level
+        logging.getLogger('gfmrag.umls_mapping.candidate_generator').setLevel(original_level)
 
         # Compute metrics
         stage2_metrics = Stage2Metrics.compute(entity_candidates)
