@@ -36,6 +36,7 @@ from .metrics import (
 )
 from .validation import Stage1Validator
 from .visualization import PipelineVisualizer, visualize_pipeline_metrics
+from .kg_filter import KGFilter, FilterConfig
 
 __all__ = [
     "UMLSMappingConfig",
@@ -62,6 +63,8 @@ __all__ = [
     "Stage1Validator",
     "PipelineVisualizer",
     "visualize_pipeline_metrics",
+    "KGFilter",
+    "FilterConfig",
 ]
 
 __version__ = "1.0.0"

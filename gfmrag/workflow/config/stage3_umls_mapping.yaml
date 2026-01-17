@@ -199,7 +199,42 @@ output_format:
   # Triples for KG: entity | mapped_to_cui | CUI
   triples:
     enabled: true
-    min_confidence: 0.5  # Only include if confidence >= 0.5
+    min_confidence: 0.6  # CRITICAL: Only include if confidence >= 0.6 (stricter)
+
+  # KG Filtering: Remove entities that don't meet criteria
+  kg_filtering:
+    enabled: true
+    min_confidence_for_inclusion: 0.6  # CRITICAL: Entities below this are REMOVED from KG
+    remove_all_triples: true            # Remove ALL triples involving low-confidence entities
+
+    # Semantic Type Filtering (optional)
+    require_medical_semantic_type: false  # If true, require entity to map to medical UMLS types
+    allowed_semantic_type_groups:         # Only include if mapped CUI has these types
+      - disease
+      - drug
+      - procedure
+      - anatomy
+      - biological
+
+    # Blacklist non-medical entities (will always be removed)
+    entity_blacklist:
+      - "and"
+      - "or"
+      - "the"
+      - "a"
+      - "an"
+      - "of"
+      - "in"
+      - "on"
+      - "at"
+      # Add more non-medical terms here
+
+    # Pattern-based filtering
+    filter_patterns:
+      - "^[0-9]+$"           # Pure numbers
+      - "^[a-z]$"            # Single lowercase letters
+      - "^[A-Z]$"            # Single uppercase letters
+      - "^\\d+\\s*[a-z]+$"   # Number followed by unit (e.g., "10 mg")
 
   # Statistics & Quality Metrics
   statistics:
@@ -207,6 +242,7 @@ output_format:
     include_cluster_stats: true
     include_confidence_distribution: true
     include_coverage_metrics: true
+    include_filtered_entities: true  # NEW: Report filtered entities
 
   # Manual Review Queue (uncertain cases)
   review_queue:
