@@ -42,6 +42,9 @@ class UMLSMappingConfig:
     # Stage 3.5: Cross-Encoder
     cross_encoder_model: str = "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
     cross_encoder_device: str = "cuda"
+    cross_encoder_weight: float = 0.4  # Weight for cross-encoder score (vs 0.6 for previous)
+    cross_encoder_min_prev_score: float = 0.6  # Pre-filter: min previous_score
+    cross_encoder_min_cross_score: float = 0.5  # Pre-filter: min cross_encoder_score
 
     # Stage 3.6: Confidence
     confidence_high_threshold: float = 0.75

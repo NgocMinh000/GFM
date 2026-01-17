@@ -149,10 +149,25 @@ cross_encoder:
     batch_size: 32
     max_length: 256  # Max tokens for input
 
+  # Pre-filtering (Quality Control)
+  # ⚡ NEW: Remove candidates before final scoring
+  pre_filtering:
+    enabled: true
+    min_previous_score: 0.6       # Minimum score from Stage 3.4 (hard negative filtering)
+    min_cross_encoder_score: 0.5  # Minimum cross-encoder score (zero-shot PubMedBERT)
+    # Rationale:
+    # - previous_score < 0.6: Weak match from SapBERT + TF-IDF + hard negative filtering
+    # - cross_encoder_score < 0.5: Cross-encoder uncertain (below 50% confidence)
+
   # Final Scoring
+  # ⚡ REBALANCED: 0.4/0.6 instead of 0.7/0.3
   score_weights:
-    cross_encoder: 0.7      # Cross-encoder score
-    previous_stage: 0.3     # Score from Stage 3.4
+    cross_encoder: 0.4      # REDUCED: Cross-encoder is zero-shot (less reliable)
+    previous_stage: 0.6     # INCREASED: Previous score is 4-stage aggregation (more reliable)
+    # Rationale:
+    # - previous_stage: SapBERT + TF-IDF + Cluster Aggregation + Hard Negative Filtering
+    # - cross_encoder: Zero-shot PubMedBERT (not fine-tuned on UMLS mapping task yet)
+    # - After fine-tuning cross-encoder, consider increasing cross_encoder weight to 0.6-0.7
 
 # Stage 3.6: Confidence Scoring & Graph Propagation
 confidence:

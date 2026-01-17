@@ -65,13 +65,36 @@ class CrossEncoderReranker:
         # Score all (entity, candidate) pairs
         cross_scores = self._score_pairs(entity, candidates)
 
-        # Combine with previous scores
+        # Combine with previous scores + apply pre-filtering
         reranked = []
+        filtered_count = 0
+
+        # Get thresholds from config
+        min_prev_score = getattr(self.config, 'cross_encoder_min_prev_score', 0.6)
+        min_cross_score = getattr(self.config, 'cross_encoder_min_cross_score', 0.5)
+        cross_weight = getattr(self.config, 'cross_encoder_weight', 0.4)
+        prev_weight = 1.0 - cross_weight
+
         for candidate, cross_score in zip(candidates, cross_scores):
-            # Weighted combination
+            # PRE-FILTERING: Remove low-quality candidates
+            # Skip if previous_score < threshold OR cross_encoder_score < threshold
+            if candidate.score < min_prev_score:
+                filtered_count += 1
+                logger.debug(f"Filtered (low previous_score): {candidate.name} (prev={candidate.score:.3f} < {min_prev_score})")
+                continue
+
+            if cross_score < min_cross_score:
+                filtered_count += 1
+                logger.debug(f"Filtered (low cross_encoder): {candidate.name} (cross={cross_score:.3f} < {min_cross_score})")
+                continue
+
+            # Weighted combination (rebalanced: configurable weights)
+            # Default: 0.4 cross-encoder, 0.6 previous
+            # Rationale: previous_score is aggregation of 4 stages (more reliable)
+            #            cross_encoder is zero-shot (less reliable until fine-tuned)
             final_score = (
-                cross_score * 0.7 +
-                candidate.score * 0.3
+                cross_score * cross_weight +
+                candidate.score * prev_weight
             )
 
             reranked.append(RerankedCandidate(
@@ -81,6 +104,10 @@ class CrossEncoderReranker:
                 cross_encoder_score=cross_score,
                 previous_score=candidate.score
             ))
+
+        # Log filtering stats
+        if filtered_count > 0:
+            logger.info(f"Pre-filtered {filtered_count}/{len(candidates)} candidates for '{entity}'")
 
         # Sort by final score
         reranked.sort(key=lambda x: x.score, reverse=True)
