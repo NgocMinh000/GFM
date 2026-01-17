@@ -82,6 +82,9 @@ class CrossEncoderTrainer:
         self.device = self._setup_device()
         self.model.to(self.device)
 
+        # Gradient accumulation (must be set before optimizer/scheduler)
+        self.gradient_accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
+
         # Optimizer and scheduler
         self.optimizer = self._setup_optimizer()
         self.scheduler = self._setup_scheduler()
@@ -100,9 +103,6 @@ class CrossEncoderTrainer:
         # TensorBoard logging
         log_dir = config["logging"].get("tensorboard", {}).get("log_dir", "tmp/training/tensorboard")
         self.writer = SummaryWriter(log_dir=log_dir)
-
-        # Gradient accumulation
-        self.gradient_accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
 
         logger.info(f"Trainer initialized. Output dir: {output_dir}")
         logger.info(f"Device: {self.device}")
@@ -127,15 +127,19 @@ class CrossEncoderTrainer:
         """Setup AdamW optimizer."""
         training_config = self.config["training"]
 
+        # Ensure learning_rate is float (yaml may parse as string)
+        lr = float(training_config["learning_rate"])
+        weight_decay = float(training_config.get("weight_decay", 0.01))
+        eps = float(training_config.get("adam_epsilon", 1e-8))
+
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=training_config["learning_rate"],
-            weight_decay=training_config.get("weight_decay", 0.01),
-            eps=training_config.get("adam_epsilon", 1e-8),
+            lr=lr,
+            weight_decay=weight_decay,
+            eps=eps,
         )
 
-        logger.info(f"Optimizer: AdamW(lr={training_config['learning_rate']}, "
-                    f"weight_decay={training_config.get('weight_decay', 0.01)})")
+        logger.info(f"Optimizer: AdamW(lr={lr}, weight_decay={weight_decay})")
 
         return optimizer
 
@@ -505,20 +509,32 @@ def main():
     # Load UMLS
     logger.info("Loading UMLS...")
     from gfmrag.umls_mapping.umls_loader import UMLSLoader
-    umls_loader = UMLSLoader()
+    from gfmrag.umls_mapping.config import UMLSMappingConfig
+
+    # Create UMLS config
+    umls_config = UMLSMappingConfig(
+        kg_clean_path='dummy',  # Not needed for training
+        umls_data_dir='data/umls',
+        output_root='tmp/umls_training',
+        mrconso_path='data/umls/META/MRCONSO.RRF',
+        mrsty_path='data/umls/META/MRSTY.RRF',
+        umls_cache_dir='data/umls/processed',
+    )
+
+    umls_loader = UMLSLoader(umls_config)
+    umls_loader.load()
 
     # Load MedMentions dataset
     logger.info("Loading MedMentions dataset...")
     medmentions_config = config["dataset"]["medmentions"]
     train_mentions, val_mentions, test_mentions = load_medmentions(
         data_path=medmentions_config["path"],
-        umls_loader=umls_loader,
+        annotation_file="corpus_pubtator.txt",  # Full annotation data (not just PMIDs)
         train_ratio=config["dataset"]["train_ratio"],
         val_ratio=config["dataset"]["val_ratio"],
         test_ratio=config["dataset"]["test_ratio"],
-        stratify=True,
-        cache_path="tmp/training/medmentions_splits.pkl",
-        random_state=seed,
+        cache_dir="tmp/training/data_splits",
+        force_reload=False,
     )
 
     logger.info(f"Train: {len(train_mentions):,}, Val: {len(val_mentions):,}, Test: {len(test_mentions):,}")

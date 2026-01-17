@@ -158,13 +158,27 @@ Ensure UMLS data is already loaded:
 
 ```bash
 # Check UMLS files exist
-ls -lh data/UMLS/MRCONSO.RRF
-ls -lh data/UMLS/MRSTY.RRF
+ls -lh data/umls/META/MRCONSO.RRF
+ls -lh data/umls/META/MRSTY.RRF
 
 # Test UMLS loader
 python -c "
 from gfmrag.umls_mapping.umls_loader import UMLSLoader
-umls = UMLSLoader()
+from gfmrag.umls_mapping.config import UMLSMappingConfig
+
+# Create config
+config = UMLSMappingConfig(
+    kg_clean_path='dummy',  # Not needed for UMLS loading only
+    umls_data_dir='data/umls',
+    output_root='tmp/umls_test',
+    mrconso_path='data/umls/META/MRCONSO.RRF',
+    mrsty_path='data/umls/META/MRSTY.RRF',
+    umls_cache_dir='data/umls/processed',
+)
+
+# Load UMLS
+umls = UMLSLoader(config)
+umls.load()
 print(f'UMLS concepts loaded: {len(umls.concepts):,}')
 "
 
@@ -178,10 +192,22 @@ print(f'UMLS concepts loaded: {len(umls.concepts):,}')
 # Build FAISS index for hard negative mining
 python -c "
 from gfmrag.umls_mapping.umls_loader import UMLSLoader
+from gfmrag.umls_mapping.config import UMLSMappingConfig
 from gfmrag.umls_mapping.stage3_umls_mapping import build_faiss_index
 
+# Create config
+config = UMLSMappingConfig(
+    kg_clean_path='dummy',
+    umls_data_dir='data/umls',
+    output_root='tmp/umls_test',
+    mrconso_path='data/umls/META/MRCONSO.RRF',
+    mrsty_path='data/umls/META/MRSTY.RRF',
+    umls_cache_dir='data/umls/processed',
+)
+
 # Load UMLS
-umls = UMLSLoader()
+umls = UMLSLoader(config)
+umls.load()
 
 # Build index (takes ~10-15 minutes)
 build_faiss_index(
@@ -203,8 +229,21 @@ ls -lh tmp/umls_faiss_index/
 python -c "
 from gfmrag.umls_mapping.training.data_loader import load_medmentions
 from gfmrag.umls_mapping.umls_loader import UMLSLoader
+from gfmrag.umls_mapping.config import UMLSMappingConfig
 
-umls = UMLSLoader()
+# Create config
+config = UMLSMappingConfig(
+    kg_clean_path='dummy',
+    umls_data_dir='data/umls',
+    output_root='tmp/umls_test',
+    mrconso_path='data/umls/META/MRCONSO.RRF',
+    mrsty_path='data/umls/META/MRSTY.RRF',
+    umls_cache_dir='data/umls/processed',
+)
+
+# Load UMLS
+umls = UMLSLoader(config)
+umls.load()
 
 train, val, test = load_medmentions(
     data_path='data/MedMentions/full',
@@ -580,9 +619,21 @@ FileNotFoundError: FAISS index not found: tmp/umls_faiss_index/umls.index
 # Rebuild FAISS index
 python -c "
 from gfmrag.umls_mapping.umls_loader import UMLSLoader
-from gfmrag.kg_construction.stage3_umls_mapping import build_faiss_index
+from gfmrag.umls_mapping.config import UMLSMappingConfig
+from gfmrag.umls_mapping.stage3_umls_mapping import build_faiss_index
 
-umls = UMLSLoader()
+# Create config
+config = UMLSMappingConfig(
+    kg_clean_path='dummy',
+    umls_data_dir='data/umls',
+    output_root='tmp/umls_test',
+    mrconso_path='data/umls/META/MRCONSO.RRF',
+    mrsty_path='data/umls/META/MRSTY.RRF',
+    umls_cache_dir='data/umls/processed',
+)
+
+umls = UMLSLoader(config)
+umls.load()
 build_faiss_index(umls, 'tmp/umls_faiss_index', use_gpu=True)
 "
 ```

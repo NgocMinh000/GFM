@@ -171,8 +171,9 @@ class MedMentionsLoader:
         """
         Load entity mentions from annotation file.
 
-        Format:
-        PMID \t Start \t End \t Mention Text \t Semantic Type \t CUI
+        Format (PubTator):
+        - Title/Abstract lines: PMID|t|text or PMID|a|text (pipe-delimited)
+        - Annotation lines: PMID \t Start \t End \t Mention \t Type \t CUI (tab-delimited)
 
         Args:
             annotation_file: Annotation file name
@@ -194,9 +195,13 @@ class MedMentionsLoader:
                 if not line or line.startswith('#'):
                     continue
 
+                # Skip title/abstract lines (PMID|t|... or PMID|a|...)
+                if '|t|' in line or '|a|' in line:
+                    continue
+
                 parts = line.split('\t')
                 if len(parts) < 6:
-                    logger.warning(f"Line {line_num}: Invalid format (expected 6 fields)")
+                    logger.warning(f"Line {line_num}: Invalid format (expected 6 tab-delimited fields, got {len(parts)})")
                     continue
 
                 pmid, start, end, mention_text, semantic_type, source_cui = parts[:6]
@@ -521,11 +526,12 @@ def load_medmentions(
     loader.print_statistics()
 
     # Split dataset
+    # Note: stratify=False to avoid errors with rare classes (single sample per class)
     train_mentions, val_mentions, test_mentions = loader.split_dataset(
         train_ratio=train_ratio,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
-        stratify=True,
+        stratify=False,  # Disabled: some CUIs have only 1 mention
     )
 
     # Save splits

@@ -85,6 +85,9 @@ class HardNegativeMiner:
         # All CUIs for random sampling
         self.all_cuis = list(umls_loader.concepts.keys())
 
+        # Tracking for statistics
+        self.missing_cuis = set()  # Track CUIs not found in UMLS
+
         # Cache for mined negatives
         self.negative_cache: Dict[str, Dict] = {}
         if self.cache_path and self.cache_path.exists():
@@ -179,7 +182,8 @@ class HardNegativeMiner:
         # Get CUI embedding
         concept = self.umls_loader.concepts.get(cui)
         if not concept or not hasattr(concept, 'embedding'):
-            logger.warning(f"CUI {cui} not found or has no embedding")
+            # Track missing CUI (don't spam warnings)
+            self.missing_cuis.add(cui)
             return []
 
         embedding = concept.embedding.reshape(1, -1)
@@ -240,7 +244,8 @@ class HardNegativeMiner:
         # Get correct CUI's semantic type
         concept = self.umls_loader.concepts.get(cui)
         if not concept or not concept.semantic_types:
-            logger.warning(f"CUI {cui} has no semantic type")
+            # Track missing CUI (don't spam warnings)
+            self.missing_cuis.add(cui)
             return []
 
         correct_type = concept.semantic_types[0]
@@ -334,17 +339,48 @@ class HardNegativeMiner:
         # Get unique CUIs
         unique_cuis = list(set(m["cui"] for m in mentions))
 
-        logger.info(f"Mining hard negatives for {len(unique_cuis)} unique CUIs")
+        logger.info(f"Mining hard negatives for {len(unique_cuis):,} unique CUIs")
 
-        # Mine negatives
+        # Mine negatives with progress tracking
         cui_to_negatives = {}
+        processed_count = 0
+        missing_count = 0
 
-        iterator = tqdm(unique_cuis, desc="Mining negatives") if show_progress else unique_cuis
+        iterator = tqdm(unique_cuis, desc="Mining negatives", disable=not show_progress)
 
         for cui in iterator:
+            # Track missing count before mining
+            missing_before = len(self.missing_cuis)
+
+            # Mine negatives for this CUI
             cui_to_negatives[cui] = self.mine_negatives_for_cui(cui)
 
-        logger.info(f"Mined negatives for {len(cui_to_negatives)} CUIs")
+            # Check if this CUI was missing
+            if len(self.missing_cuis) > missing_before:
+                missing_count += 1
+
+            processed_count += 1
+
+            # Log progress every 100 CUIs
+            if processed_count % 100 == 0:
+                success_count = processed_count - missing_count
+                success_pct = (success_count / processed_count * 100) if processed_count > 0 else 0
+                missing_pct = (missing_count / processed_count * 100) if processed_count > 0 else 0
+                logger.info(
+                    f"Progress: {processed_count:,}/{len(unique_cuis):,} CUIs "
+                    f"({processed_count/len(unique_cuis)*100:.1f}%) - "
+                    f"Success: {success_count:,} ({success_pct:.1f}%), "
+                    f"Missing: {missing_count:,} ({missing_pct:.1f}%)"
+                )
+
+        # Final summary
+        success_count = processed_count - missing_count
+        success_pct = (success_count / processed_count * 100) if processed_count > 0 else 0
+        missing_pct = (missing_count / processed_count * 100) if processed_count > 0 else 0
+
+        logger.info(f"✓ Mining completed: {processed_count:,} CUIs processed")
+        logger.info(f"  - Successfully mined: {success_count:,} ({success_pct:.1f}%)")
+        logger.info(f"  - Missing in UMLS:   {missing_count:,} ({missing_pct:.1f}%)")
 
         # Save cache
         if self.cache_path:
@@ -426,6 +462,12 @@ class HardNegativeMiner:
         print("=" * 80)
         print(f"CUIs with negatives:     {stats['num_cuis']:,}")
         print(f"Total negatives:         {stats['total_negatives']:,}")
+
+        # Show missing CUIs info
+        if self.missing_cuis:
+            print(f"\nMissing CUIs (not in UMLS): {len(self.missing_cuis):,}")
+            print(f"  Note: These CUIs will use random negatives only")
+            print(f"  Reason: UMLS version mismatch (MedMentions uses 2017AA)")
         print()
         print("Semantic Hard Negatives (high similarity, wrong CUI):")
         print("-" * 80)
