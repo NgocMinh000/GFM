@@ -468,6 +468,7 @@ class CandidateGenerator:
             (top_k_indices, top_k_scores): Arrays of shape [batch_size, top_k]
         """
         import torch
+        from tqdm import tqdm
 
         batch_size = query_vecs.shape[0]
         n_umls = self.tfidf_matrix.shape[0]
@@ -483,8 +484,23 @@ class CandidateGenerator:
         # Chunk size: balance between speed and memory
         # 50K vectors × vocab_size (~50K) × 4 bytes ≈ 10GB
         chunk_size = 50000  # Adjust based on available VRAM
+        num_chunks = (n_umls + chunk_size - 1) // chunk_size
 
-        for chunk_start in range(0, n_umls, chunk_size):
+        # Progress bar for GPU chunking (nested under main progress)
+        chunk_iterator = range(0, n_umls, chunk_size)
+
+        # Only show progress for first batch (to avoid spam)
+        if not hasattr(self, '_gpu_tfidf_first_run'):
+            chunk_iterator = tqdm(
+                chunk_iterator,
+                desc=f"  ↳ GPU TF-IDF chunks",
+                unit="chunk",
+                leave=False,
+                position=1
+            )
+            self._gpu_tfidf_first_run = True
+
+        for chunk_start in chunk_iterator:
             chunk_end = min(chunk_start + chunk_size, n_umls)
 
             # Convert chunk to dense and move to GPU
