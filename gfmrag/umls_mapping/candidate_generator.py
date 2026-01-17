@@ -129,16 +129,34 @@ class CandidateGenerator:
             # Fallback: process one by one
             return [self.generate_candidates(entity, k) for entity in entities]
 
-        # Batch TF-IDF search (OPTIMIZATION: vectorized)
+        # Batch TF-IDF search (FIXED: Process one-by-one to avoid memory explosion)
+        # NOTE: Cannot batch TF-IDF efficiently because:
+        #   - tfidf_matrix is HUGE (7.9M × vocab_size)
+        #   - Batching creates dense [batch_size × 7.9M] matrix → OOM + slow
+        #   - Processing one-by-one with sparse ops is actually FASTER
         entities_lower = [e.lower() for e in entities]
-        query_vecs = self.tfidf_vectorizer.transform(entities_lower)  # [batch_size, vocab_size]
 
-        # Compute similarities for all queries at once
-        tfidf_similarities = (query_vecs * self.tfidf_matrix.T).toarray()  # [batch_size, n_umls]
+        tfidf_top_k_indices_list = []
+        tfidf_top_k_scores_list = []
 
-        # Get top-k for each query
-        tfidf_top_k_indices = np.argsort(-tfidf_similarities, axis=1)[:, :self.config.sapbert_top_k]  # [batch_size, k]
-        tfidf_top_k_scores = np.take_along_axis(tfidf_similarities, tfidf_top_k_indices, axis=1)  # [batch_size, k]
+        for entity_lower in entities_lower:
+            # Transform single query (stays sparse)
+            query_vec = self.tfidf_vectorizer.transform([entity_lower])  # [1, vocab_size] sparse
+
+            # Compute similarities (sparse × sparse = sparse, FAST!)
+            similarities = (query_vec * self.tfidf_matrix.T).toarray()[0]  # [7.9M] dense
+
+            # Get top-k indices and scores
+            top_k_indices = np.argpartition(-similarities, self.config.sapbert_top_k)[:self.config.sapbert_top_k]
+            top_k_indices = top_k_indices[np.argsort(-similarities[top_k_indices])]  # Sort top-k
+            top_k_scores = similarities[top_k_indices]
+
+            tfidf_top_k_indices_list.append(top_k_indices)
+            tfidf_top_k_scores_list.append(top_k_scores)
+
+        # Convert to arrays for easier indexing
+        tfidf_top_k_indices = np.array(tfidf_top_k_indices_list)  # [batch_size, k]
+        tfidf_top_k_scores = np.array(tfidf_top_k_scores_list)    # [batch_size, k]
 
         # Process results for each entity
         all_candidates = []
