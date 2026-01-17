@@ -48,8 +48,9 @@ class Stage3UMLSMapping:
     6. Confidence Scoring & Propagation
     """
 
-    def __init__(self, config: UMLSMappingConfig):
+    def __init__(self, config: UMLSMappingConfig, hydra_cfg=None):
         self.config = config
+        self.hydra_cfg = hydra_cfg  # Store Hydra config for filtering
         self.output_dir = Path(config.output_root)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -253,8 +254,8 @@ class Stage3UMLSMapping:
 
         self.metrics.end_stage(output_count=len(final_mappings))
 
-        # Save final results
-        self._save_final_outputs(final_mappings)
+        # Save final results (with filtering if enabled)
+        self._save_final_outputs(final_mappings, cfg=self.hydra_cfg)
 
         # Save all metrics
         self.metrics.save_metrics()
@@ -299,13 +300,42 @@ class Stage3UMLSMapping:
         
         logger.info(f"Saved intermediate results to: {output_path}")
 
-    def _save_final_outputs(self, final_mappings: Dict):
-        """Save final outputs in multiple formats"""
+    def _save_final_outputs(self, final_mappings: Dict, cfg=None):
+        """Save final outputs in multiple formats with KG filtering"""
 
         logger.info("\nSaving final outputs...")
 
-        # 1. JSON with full details
-        json_path = self.output_dir / "final_umls_mappings.json"
+        # Import KG Filter
+        from gfmrag.umls_mapping.kg_filter import KGFilter, FilterConfig
+
+        # Initialize filter from config (if provided)
+        kg_filter = None
+        if cfg and cfg.get('output_format', {}).get('kg_filtering', {}).get('enabled', False):
+            filter_cfg_dict = cfg['output_format']['kg_filtering']
+            filter_config = FilterConfig(
+                enabled=filter_cfg_dict.get('enabled', True),
+                min_confidence=filter_cfg_dict.get('min_confidence_for_inclusion', 0.6),
+                remove_all_triples=filter_cfg_dict.get('remove_all_triples', True),
+                require_medical_semantic_type=filter_cfg_dict.get('require_medical_semantic_type', False),
+                allowed_semantic_type_groups=filter_cfg_dict.get('allowed_semantic_type_groups', []),
+                entity_blacklist=filter_cfg_dict.get('entity_blacklist', []),
+                filter_patterns=filter_cfg_dict.get('filter_patterns', [])
+            )
+            kg_filter = KGFilter(filter_config, self.umls_loader)
+            logger.info("\n" + "=" * 80)
+            logger.info("KG FILTERING ENABLED")
+            logger.info("=" * 80)
+
+        # Apply filtering
+        if kg_filter:
+            included_mappings, excluded_entities = kg_filter.filter_mappings(final_mappings)
+            logger.info(f"\n✓ Filtered {len(excluded_entities)} entities from KG")
+        else:
+            included_mappings = final_mappings
+            excluded_entities = {}
+
+        # 1. JSON with full details (UNFILTERED - for analysis)
+        json_path = self.output_dir / "final_umls_mappings_all.json"
         json_data = {}
         for entity, mapping in final_mappings.items():
             json_data[entity] = {
@@ -321,20 +351,49 @@ class Stage3UMLSMapping:
                 'is_propagated': mapping.is_propagated,
                 'confidence_factors': mapping.confidence_factors
             }
-        
+
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, indent=2, default=str)
-        logger.info(f"Saved JSON mappings to: {json_path}")
+        logger.info(f"Saved ALL mappings (unfiltered) to: {json_path}")
 
-        # 2. Triples for KG (entity | mapped_to_cui | CUI)
+        # 1b. JSON with FILTERED mappings (for KG construction)
+        if kg_filter:
+            json_filtered_path = self.output_dir / "final_umls_mappings_filtered.json"
+            json_filtered = {}
+            for entity, mapping in included_mappings.items():
+                json_filtered[entity] = {
+                    'cui': mapping.cui,
+                    'name': mapping.name,
+                    'confidence': mapping.confidence,
+                    'tier': mapping.tier,
+                    'alternatives': [
+                        {'cui': cui, 'name': name, 'score': score}
+                        for cui, name, score in mapping.alternatives
+                    ],
+                    'cluster_size': len(mapping.cluster_members),
+                    'is_propagated': mapping.is_propagated,
+                    'confidence_factors': mapping.confidence_factors
+                }
+
+            with open(json_filtered_path, 'w', encoding='utf-8') as f:
+                json.dump(json_filtered, f, indent=2, default=str)
+            logger.info(f"Saved FILTERED mappings (for KG) to: {json_filtered_path}")
+
+        # 1c. Save excluded entities with reasons
+        if kg_filter and excluded_entities:
+            excluded_path = self.output_dir / "excluded_entities.json"
+            with open(excluded_path, 'w', encoding='utf-8') as f:
+                json.dump(excluded_entities, f, indent=2)
+            logger.info(f"Saved excluded entities to: {excluded_path}")
+
+        # 2. Triples for KG (entity | mapped_to_cui | CUI) - FILTERED
         triples_path = self.output_dir / "umls_mapping_triples.txt"
         with open(triples_path, 'w', encoding='utf-8') as f:
-            for entity, mapping in final_mappings.items():
-                if mapping.confidence >= 0.5:  # Min confidence threshold
-                    f.write(f"{entity}|mapped_to_cui|{mapping.cui}\n")
-        logger.info(f"Saved KG triples to: {triples_path}")
+            for entity, mapping in included_mappings.items():
+                f.write(f"{entity}|mapped_to_cui|{mapping.cui}\n")
+        logger.info(f"Saved KG triples (FILTERED) to: {triples_path}")
 
-        # 3. Statistics
+        # 3. Statistics (with filtering info)
         stats_path = self.output_dir / "mapping_statistics.json"
         total = len(final_mappings)
         high = sum(1 for m in final_mappings.values() if m.tier == 'high')
@@ -353,6 +412,22 @@ class Stage3UMLSMapping:
             'low_confidence_pct': f"{low/total*100:.2f}%",
             'propagated_pct': f"{propagated/total*100:.2f}%"
         }
+
+        # Add filtering stats
+        if kg_filter:
+            stats['kg_filtering'] = {
+                'enabled': True,
+                'total_entities': total,
+                'included_in_kg': len(included_mappings),
+                'excluded_from_kg': len(excluded_entities),
+                'inclusion_rate': f"{len(included_mappings)/total*100:.2f}%",
+                'exclusion_rate': f"{len(excluded_entities)/total*100:.2f}%",
+                'min_confidence_threshold': kg_filter.config.min_confidence
+            }
+        else:
+            stats['kg_filtering'] = {
+                'enabled': False
+            }
 
         with open(stats_path, 'w') as f:
             json.dump(stats, f, indent=2)
@@ -405,8 +480,10 @@ def main(cfg: DictConfig):
         device=cfg.general.device
     )
 
-    # Run pipeline
-    pipeline = Stage3UMLSMapping(config)
+    # Run pipeline (pass Hydra config for KG filtering)
+    from omegaconf import OmegaConf
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)  # Convert to dict
+    pipeline = Stage3UMLSMapping(config, hydra_cfg=cfg_dict)
     pipeline.run()
 
 
