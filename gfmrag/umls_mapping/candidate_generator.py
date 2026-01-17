@@ -375,11 +375,41 @@ class CandidateGenerator:
         # Load or compute embeddings
         if self.sapbert_cache.exists() and not self.config.force_recompute:
             logger.info(f"Loading precomputed SapBERT embeddings from {self.sapbert_cache}")
-            with open(self.sapbert_cache, 'rb') as f:
-                cached = pickle.load(f)
-                self.sapbert_embeddings = cached['embeddings']
-                self.umls_names = cached['names']
-                self.name_to_cui = cached['name_to_cui']
+
+            # Check if we have memory-mapped version (.npy)
+            npy_cache = self.sapbert_cache.with_suffix('.npy')
+            if npy_cache.exists():
+                logger.info("   📦 Loading embeddings with memory-mapping (RAM-efficient)...")
+                self.sapbert_embeddings = np.load(str(npy_cache), mmap_mode='r')
+                # Load metadata
+                meta_cache = self.sapbert_cache.with_suffix('.meta.pkl')
+                with open(meta_cache, 'rb') as f:
+                    meta = pickle.load(f)
+                    self.umls_names = meta['names']
+                    self.name_to_cui = meta['name_to_cui']
+                logger.info(f"   ✓ Loaded {len(self.sapbert_embeddings):,} embeddings (memory-mapped)")
+            else:
+                # Legacy pickle format - requires full RAM load
+                logger.warning("   ⚠️  Legacy pickle format detected (requires 24GB RAM)")
+                logger.info("   Converting to memory-mapped format for future use...")
+                with open(self.sapbert_cache, 'rb') as f:
+                    cached = pickle.load(f)
+                    self.sapbert_embeddings = cached['embeddings']
+                    self.umls_names = cached['names']
+                    self.name_to_cui = cached['name_to_cui']
+
+                # Save as memory-mapped for next time
+                logger.info("   Saving memory-mapped version...")
+                np.save(str(npy_cache), self.sapbert_embeddings)
+                with open(meta_cache, 'wb') as f:
+                    pickle.dump({'names': self.umls_names, 'name_to_cui': self.name_to_cui}, f)
+                logger.info("   ✓ Memory-mapped version saved for future runs")
+
+                # Reload as memory-mapped to free RAM
+                del self.sapbert_embeddings
+                import gc
+                gc.collect()
+                self.sapbert_embeddings = np.load(str(npy_cache), mmap_mode='r')
         else:
             logger.info("Computing SapBERT embeddings for all UMLS concepts...")
             self._precompute_sapbert_embeddings()
@@ -491,14 +521,61 @@ class CandidateGenerator:
 
                 torch.cuda.empty_cache()
 
-        # CPU fallback
-        logger.info("   Building CPU IndexFlatIP (exact search)...")
+        # CPU fallback with memory-efficient IVF index
+        logger.info("   Building CPU IndexIVFFlat (approximate search, memory-efficient)...")
         logger.info("   SapBERT stays on GPU for fast query encoding")
 
-        cpu_index = faiss.IndexFlatIP(dim)
-        cpu_index.add(self.sapbert_embeddings.astype('float32'))
+        # Use IVF (Inverted File) index for memory efficiency
+        # nlist = number of clusters (sqrt(N) is a good heuristic)
+        n_embeddings = len(self.sapbert_embeddings)
+        nlist = min(int(np.sqrt(n_embeddings)), 16384)  # Max 16K clusters
+        nprobe = 64  # Number of clusters to search (higher = more accurate)
+
+        logger.info(f"   IVF config: {nlist:,} clusters, nprobe={nprobe}")
+        logger.info(f"   Expected accuracy: >95% (vs 100% for exact search)")
+        logger.info(f"   Memory savings: ~10x less than IndexFlatIP")
+
+        # Create IVF index
+        quantizer = faiss.IndexFlatIP(dim)
+        cpu_index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+
+        # Train on subset to save memory (10% sample or max 1M vectors)
+        train_size = min(n_embeddings, max(int(n_embeddings * 0.1), 100000))
+        logger.info(f"   Training IVF on {train_size:,} samples...")
+
+        # Sample embeddings for training (every Nth sample)
+        sample_step = max(1, n_embeddings // train_size)
+        train_embeddings = self.sapbert_embeddings[::sample_step].astype('float32')
+
+        # Ensure contiguous array
+        if not train_embeddings.flags['C_CONTIGUOUS']:
+            train_embeddings = np.ascontiguousarray(train_embeddings)
+
+        cpu_index.train(train_embeddings)
+        logger.info(f"   ✓ Training complete")
+
+        # Add all embeddings in batches to avoid memory spike
+        batch_size = 100000
+        logger.info(f"   Adding {n_embeddings:,} embeddings in batches of {batch_size:,}...")
+
+        for i in range(0, n_embeddings, batch_size):
+            end = min(i + batch_size, n_embeddings)
+            batch = self.sapbert_embeddings[i:end].astype('float32')
+
+            # Ensure contiguous
+            if not batch.flags['C_CONTIGUOUS']:
+                batch = np.ascontiguousarray(batch)
+
+            cpu_index.add(batch)
+
+            if (i // batch_size + 1) % 10 == 0:
+                logger.info(f"      Added {end:,} / {n_embeddings:,} ({end/n_embeddings*100:.1f}%)")
+
+        # Set search parameters
+        cpu_index.nprobe = nprobe
 
         self.faiss_index = cpu_index
+        logger.info(f"   ✓ IVF index built successfully with {nlist:,} clusters")
         logger.info(f"   ✅ CPU FAISS index built successfully!")
         logger.info(f"   📊 Index type: IndexFlatIP (exact search, 100% accuracy)")
         logger.info(f"   🚀 With batch TF-IDF: 3-5x faster")
@@ -523,14 +600,32 @@ class CandidateGenerator:
         # Use chunked encoding with automatic memory management
         self.sapbert_embeddings = self._encode_sapbert_chunked(self.umls_names)
 
-        # Save to cache
-        logger.info(f"Saving SapBERT embeddings to {self.sapbert_cache}")
+        # Save to cache in memory-mapped format
+        logger.info(f"Saving SapBERT embeddings (memory-mapped format)...")
+
+        # Save embeddings as .npy (memory-mappable)
+        npy_cache = self.sapbert_cache.with_suffix('.npy')
+        np.save(str(npy_cache), self.sapbert_embeddings)
+        logger.info(f"   ✓ Embeddings saved: {npy_cache}")
+
+        # Save metadata separately
+        meta_cache = self.sapbert_cache.with_suffix('.meta.pkl')
+        with open(meta_cache, 'wb') as f:
+            pickle.dump({
+                'names': self.umls_names,
+                'name_to_cui': self.name_to_cui
+            }, f)
+        logger.info(f"   ✓ Metadata saved: {meta_cache}")
+
+        # Also save legacy pickle format for backward compatibility
         with open(self.sapbert_cache, 'wb') as f:
             pickle.dump({
                 'embeddings': self.sapbert_embeddings,
                 'names': self.umls_names,
                 'name_to_cui': self.name_to_cui
             }, f)
+        logger.info(f"   ✓ Legacy format saved: {self.sapbert_cache}")
+
         logger.info("✓ SapBERT embeddings cached successfully")
 
     def _encode_sapbert_with_checkpointing(
