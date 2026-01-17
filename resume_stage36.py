@@ -121,50 +121,97 @@ def load_preprocessor_data(stage31_path: Path) -> tuple:
     """
     Load entities and synonym clusters from stage 3.1 preprocessing
 
+    Args:
+        stage31_path: Path to stage31_preprocessing directory (or .json file for backward compatibility)
+
     Returns:
         (entities dict, synonym_clusters dict)
     """
 
     logger.info(f"Loading preprocessing data from: {stage31_path}")
 
-    # The preprocessing stage should have saved entity data
-    # We need to reconstruct the entity objects
-    # For now, we'll work with a simplified version
+    from dataclasses import dataclass
 
-    # Load the entities (this might need adjustment based on actual file structure)
-    with open(stage31_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    @dataclass
+    class SimpleEntity:
+        original: str
+        normalized: str
+        synonym_group: frozenset
 
-    # Extract entity -> synonym_group mapping
     entities = {}
     synonym_clusters = {}
 
-    for entity, entity_data in data.items():
-        # Create simplified entity object
-        from dataclasses import dataclass
+    # Check if it's a directory or file
+    if stage31_path.is_dir():
+        # NEW FORMAT: Directory with separate files
+        logger.info("Detected directory format (stage31_preprocessing/)")
 
-        @dataclass
-        class SimpleEntity:
-            original: str
-            normalized: str
-            synonym_group: frozenset
+        # Load normalized_entities.json
+        normalized_file = stage31_path / "normalized_entities.json"
+        synonym_file = stage31_path / "synonym_clusters.json"
 
-        # Get synonym group
-        if isinstance(entity_data, dict):
-            synonym_group = frozenset(entity_data.get('synonym_group', [entity]))
-        else:
-            synonym_group = frozenset([entity])
+        if not normalized_file.exists():
+            raise FileNotFoundError(f"Missing file: {normalized_file}")
+        if not synonym_file.exists():
+            raise FileNotFoundError(f"Missing file: {synonym_file}")
 
-        entities[entity] = SimpleEntity(
-            original=entity,
-            normalized=entity_data.get('normalized', entity) if isinstance(entity_data, dict) else entity,
-            synonym_group=synonym_group
-        )
+        logger.info(f"Loading normalized entities from: {normalized_file}")
+        with open(normalized_file, 'r', encoding='utf-8') as f:
+            normalized_data = json.load(f)
 
-        # Build synonym_clusters (cluster -> members)
-        cluster_key = tuple(sorted(synonym_group))
-        if cluster_key not in synonym_clusters:
-            synonym_clusters[cluster_key] = list(synonym_group)
+        logger.info(f"Loading synonym clusters from: {synonym_file}")
+        with open(synonym_file, 'r', encoding='utf-8') as f:
+            synonym_data = json.load(f)
+
+        # Build entities dict
+        # normalized_data format: {entity: normalized_form}
+        for entity, normalized in normalized_data.items():
+            # Find synonym group for this entity
+            synonym_group = frozenset([entity])  # Default
+
+            # Search in synonym_clusters
+            for cluster_members in synonym_data.values():
+                if entity in cluster_members:
+                    synonym_group = frozenset(cluster_members)
+                    break
+
+            entities[entity] = SimpleEntity(
+                original=entity,
+                normalized=normalized,
+                synonym_group=synonym_group
+            )
+
+        # Build synonym_clusters dict
+        # synonym_data format: {cluster_id: [member1, member2, ...]}
+        for cluster_id, members in synonym_data.items():
+            cluster_key = tuple(sorted(members))
+            synonym_clusters[cluster_key] = members
+
+    else:
+        # OLD FORMAT: Single JSON file (backward compatibility)
+        logger.info("Detected file format (stage31_preprocessing.json)")
+
+        with open(stage31_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Extract entity -> synonym_group mapping
+        for entity, entity_data in data.items():
+            # Get synonym group
+            if isinstance(entity_data, dict):
+                synonym_group = frozenset(entity_data.get('synonym_group', [entity]))
+            else:
+                synonym_group = frozenset([entity])
+
+            entities[entity] = SimpleEntity(
+                original=entity,
+                normalized=entity_data.get('normalized', entity) if isinstance(entity_data, dict) else entity,
+                synonym_group=synonym_group
+            )
+
+            # Build synonym_clusters (cluster -> members)
+            cluster_key = tuple(sorted(synonym_group))
+            if cluster_key not in synonym_clusters:
+                synonym_clusters[cluster_key] = list(synonym_group)
 
     logger.info(f"Loaded {len(entities)} entities in {len(synonym_clusters)} synonym clusters")
 
@@ -188,10 +235,10 @@ def main():
         help='Stage 3.5 results file (default: <output-dir>/stage35_reranked.json)'
     )
     parser.add_argument(
-        '--stage31-file',
+        '--stage31-path',
         type=str,
         default=None,
-        help='Stage 3.1 preprocessing file (default: <output-dir>/stage31_preprocessing.json)'
+        help='Stage 3.1 preprocessing directory or file (default: <output-dir>/stage31_preprocessing/)'
     )
     parser.add_argument(
         '--min-prev-score',
@@ -222,7 +269,7 @@ def main():
 
     output_dir = Path(args.output_dir)
     stage35_file = Path(args.stage35_file) if args.stage35_file else output_dir / "stage35_reranked.json"
-    stage31_file = Path(args.stage31_file) if args.stage31_file else output_dir / "stage31_preprocessing.json"
+    stage31_path = Path(args.stage31_path) if args.stage31_path else output_dir / "stage31_preprocessing"
 
     logger.info("=" * 80)
     logger.info("RESUMING STAGE 3 PIPELINE FROM STAGE 3.6")
@@ -250,7 +297,7 @@ def main():
     # Step 2: Load preprocessing data
     logger.info("\n[Step 2] Loading preprocessing data...")
     try:
-        entities, synonym_clusters = load_preprocessor_data(stage31_file)
+        entities, synonym_clusters = load_preprocessor_data(stage31_path)
     except Exception as e:
         logger.error(f"Failed to load preprocessing data: {e}")
         logger.info("You may need to manually provide the entity and synonym cluster data")
